@@ -1,0 +1,107 @@
+#!/usr/bin/python3
+"""Verify the shared browser through a disposable local page. Interrupts only its relay."""
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
+from pathlib import Path
+import queue
+import secrets
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+def serve_page():
+    token=secrets.token_hex(12)
+    prefix="/"+token+"/"
+    page=sys.stdin.buffer.read()
+    class Page(BaseHTTPRequestHandler):
+        def log_message(self,*args):pass
+        def do_GET(self):
+            if self.path==prefix:body=page
+            elif self.path==prefix+"ping":body=b"ok"
+            else:self.send_error(404);return
+            self.send_response(200);self.send_header("Cache-Control","no-store")
+            self.send_header("Content-Type","text/html; charset=utf-8")
+            self.end_headers();self.wfile.write(body)
+        def do_POST(self):
+            stage=self.path[len(prefix):]
+            if not self.path.startswith(prefix) or stage not in ("ready","blocked","restored","failed"):
+                self.send_error(404);return
+            self.send_response(204);self.send_header("Cache-Control","no-store");self.end_headers()
+            print(stage,flush=True)
+            if stage in ("restored","failed"):
+                threading.Thread(target=server.shutdown,daemon=True).start()
+    with ThreadingHTTPServer(("127.0.0.1",0),Page) as server:
+        expiry=threading.Timer(160,server.shutdown)
+        expiry.daemon=True;expiry.start()
+        print("http://dow-"+token+".localhost:"+str(server.server_port)+prefix,flush=True)
+        server.serve_forever()
+
+def main():
+    state=Path.home()/"Library/Application Support/dow-native"
+    domain="gui/"+str(os.getuid())
+    name="org.dow-workbench.chrome-relay"
+    plist=str(Path.home()/"Library/LaunchAgents"/(name+".plist"))
+    docker=["/opt/homebrew/bin/docker","--context","colima-dow","exec"]
+    def relay_healthy():
+        try:
+            with socket.socket(socket.AF_UNIX) as s:
+                s.settimeout(4);s.connect(str(state/"relay.sock"));s.sendall(b'{"action":"health"}\n')
+                return json.loads(s.makefile("rb").readline()).get("ok")
+        except (ValueError,OSError):return False
+    def restore():
+        for _ in range(12):
+            if subprocess.run(["launchctl","print",domain+"/"+name],capture_output=True).returncode==0: break
+            if subprocess.run(["launchctl","bootstrap",domain,plist],capture_output=True).returncode==0: break
+            time.sleep(1)
+        for _ in range(60):
+            if relay_healthy(): return
+            time.sleep(.5)
+        raise RuntimeError("Chrome 中转未恢复")
+    # The test server and callback are inside the CLI container. No private tabs
+    # are inspected. Only this synthetic page fetches the public IP observations.
+    script=Path(__file__).read_text()
+    page_script=Path(__file__).with_name("verify-page.js").read_text()
+    expected=(Path.home()/".config/dow/expected-ip").read_text().strip()
+    html=('<meta charset="utf-8"><title>Dow 网络检查</title><body>正在检查固定出口…'
+          '<script>const expected='+json.dumps(expected)+';'+page_script+'</script>').encode()
+    proc=subprocess.Popen([*docker,"-i","aiwork-tools","python3","-u","-c",script,"--page"],
+                          stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+    proc.stdin.write(html);proc.stdin.close()
+    events=queue.Queue()
+    def collect():
+        for line in proc.stdout: events.put(line.decode().strip())
+        events.put("eof")
+    threading.Thread(target=collect,daemon=True).start()
+    def expect(stage,timeout=40):
+        try:value=events.get(timeout=timeout)
+        except queue.Empty:raise RuntimeError("未收到检查页的回执："+stage) from None
+        if value!=stage:raise RuntimeError("浏览器未通过网络检查："+stage+" ("+value+")")
+    try:
+        url=events.get(timeout=10)
+        if not url.startswith("http://dow-"):raise RuntimeError("本机检查页未就绪")
+        subprocess.run([*docker,"aiwork-tools","browser-open",url],check=True,timeout=45)
+        expect("ready")
+        print(f"共享 Chrome：两个网站均返回 {expected}。",flush=True)
+        time.sleep(1)
+        try:
+            subprocess.run(["launchctl","bootout",domain+"/"+name],check=True)
+            for _ in range(20):
+                with socket.socket() as probe:
+                    if probe.connect_ex(("127.0.0.1",39175))!=0:break
+                time.sleep(.2)
+            else:raise RuntimeError("中转监听仍在运行")
+            time.sleep(8)
+        finally:restore()
+        expect("blocked")
+        expect("restored")
+        print("共享 Chrome：中转中断时请求失败，恢复后两个网站均返回指定地址。",flush=True)
+    finally:
+        if proc.poll() is None:
+            try:proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:proc.terminate();proc.wait()
+if __name__=="__main__":
+    if sys.argv[1:]==["--page"]:serve_page()
+    else:main()

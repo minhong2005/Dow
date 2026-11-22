@@ -1,0 +1,16 @@
+#!/bin/bash
+set -euo pipefail
+dc() { docker --context colima-dow "$@"; }
+if [ "$(dc inspect -f '{{.HostConfig.NetworkMode}}' aiwork-tools)" != none ]; then
+  echo '工作区存在非隔离网络。' >&2
+  exit 1
+fi
+socket=/home/node/.local/state/aiwork-codex/client.sock
+dc exec aiwork-tools test -S "$socket"
+test "$(dc exec aiwork-tools readlink /proc/self/ns/net)" = "$(dc exec aiwork-codex readlink /proc/self/ns/net)"
+test "$(dc exec aiwork-codex exit-ip)" = "$(cat "${DOW_CONFIG_DIR:-$HOME/.config/dow}/expected-ip")"
+dc exec -w /work/main aiwork-codex codex sandbox -c 'sandbox_mode="read-only"' -- \
+  /bin/sh -ec 'ls -A >/dev/null; test ! -w .; pwd'
+dc exec -w /work/main aiwork-codex codex sandbox -c 'sandbox_mode="workspace-write"' -- \
+  /bin/sh -ec 'test -w .; test ! -w "$HOME"'
+echo 'Codex 终端、项目读写权限和固定出口检查通过。'

@@ -1,0 +1,73 @@
+#!/bin/bash
+# Run only on the newly installed workspace; interrupts its proxy temporarily.
+set -euo pipefail
+dc() { docker --context colima-dow "$@"; }
+run() { dc exec aiwork-tools "$@"; }
+for tool in agy codex claude tmux; do
+  if [ "$tool" = tmux ]; then run tmux -V; else run "$tool" --version; fi
+done
+run test -w /work
+test "$(dc inspect -f '{{.HostConfig.NetworkMode}}' aiwork-tools)" = none
+check_ip() {
+  local observed
+  observed=$(run exit-ip)
+  test "$observed" = "$(cat "${DOW_CONFIG_DIR:-$HOME/.config/dow}/expected-ip")"
+}
+check_direct() {
+  # Numeric destinations avoid confusing a DNS failure with route isolation.
+  dc exec -i aiwork-tools python3 - <<'PY'
+import errno, os, socket
+assert os.listdir("/sys/class/net") == ["lo"]
+for family, address in [(socket.AF_INET,"1.1.1.1"), (socket.AF_INET6,"2606:4700:4700::1111")]:
+    for kind, port in [(socket.SOCK_STREAM,443),(socket.SOCK_DGRAM,53),(socket.SOCK_DGRAM,443)]:
+        try:
+            with socket.socket(family,kind) as sock:
+                sock.settimeout(2)
+                sock.connect((address,port))
+        except OSError as exc:
+            assert exc.errno in (errno.ENETUNREACH,errno.EHOSTUNREACH,errno.EAFNOSUPPORT,errno.EADDRNOTAVAIL), exc
+        else:
+            raise SystemExit("Unexpected route to "+address)
+PY
+}
+# Start a shell before each outage, and trigger its request after the outage.
+outage() {
+  local marker worker
+  marker=$(run mktemp -d)
+  dc exec aiwork-tools sh -c '
+    touch "$1/ready"
+    while [ ! -f "$1/go" ]; do sleep 0.1; done
+    ! curl -fsS --max-time 6 https://api.ipify.org >/dev/null 2>&1
+  ' sh "$marker" &
+  worker=$!
+  for ((i=0;i<60;i++)); do run test -f "$marker/ready" && break; sleep 0.1; done
+  run test -f "$marker/ready"
+  if [ "$1" = upstream ]; then
+    dc exec aiwork-gateway iptables -I OUTPUT 1 -p tcp -d "$upstream" --dport "$port" -j DROP
+  else
+    dc stop -t 2 aiwork-gateway >/dev/null
+  fi
+  run touch "$marker/go"
+  if run curl -fsS --max-time 6 https://api.ipify.org >/dev/null 2>&1; then
+    echo "Unexpected access during $1 failure" >&2; return 1
+  fi
+  wait "$worker"
+  check_direct
+  run rm -r "$marker"
+  if [ "$1" = upstream ]; then
+    dc exec aiwork-gateway iptables -D OUTPUT -p tcp -d "$upstream" --dport "$port" -j DROP
+  else
+    dc start aiwork-gateway >/dev/null
+  fi
+  check_ip
+}
+upstream=$(dc exec aiwork-gateway printenv UPSTREAM_IP)
+port=$(dc exec aiwork-gateway printenv UPSTREAM_PORT)
+check_direct
+check_ip
+# Restart only this dedicated gateway on failure to restore its configured rules.
+trap 'dc restart -t 1 aiwork-gateway >/dev/null' EXIT
+outage upstream
+outage gateway
+trap - EXIT
+echo 'PASS: exact IP, IPv4/IPv6, UDP/DNS, existing and new shells, both outage tests, recovery'

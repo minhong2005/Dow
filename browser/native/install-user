@@ -1,0 +1,31 @@
+#!/usr/bin/python3
+import os
+from pathlib import Path
+import plistlib
+import shutil
+import subprocess
+
+os.umask(0o077)
+base = Path(__file__).resolve().parent
+state = Path.home()/"Library/Application Support/dow-native"
+state.mkdir(exist_ok=True,mode=0o700)
+program = state/"chrome-window.new"
+subprocess.run(["/usr/bin/swiftc","-O","-framework","AppKit",str(base/"ChromeWindow.swift"),"-o",str(program)],check=True)
+os.replace(program,state/"chrome-window")
+for name in ("driver.py","relay.py","open.py"):
+    tmp = state/(name+".new")
+    shutil.copyfile(base/name,tmp)
+    os.replace(tmp,state/name)
+docker = ["/opt/homebrew/bin/docker","--context","colima-dow"]
+subprocess.run([*docker,"cp",str(base.parent.parent/"workspace/aiwork-native-requests"),"aiwork-tools:/usr/local/bin/aiwork-native-requests"],check=True)
+name = "org.dow-workbench.chrome-relay"
+plist = Path.home()/"Library/LaunchAgents"/(name+".plist")
+plist.parent.mkdir(parents=True,exist_ok=True)
+plist.write_bytes(plistlib.dumps(dict(Label=name,ProgramArguments=["/usr/bin/python3","-I",str(state/"relay.py")],
+    KeepAlive=True,RunAtLoad=True,ThrottleInterval=5,StandardErrorPath=str(state/"relay-errors.log"))))
+domain = "gui/"+str(os.getuid())
+label = domain+"/"+name
+if subprocess.run(["launchctl","print",label],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:
+    subprocess.run(["launchctl","kickstart","-k",label],check=True)
+else:
+    subprocess.run(["launchctl","bootstrap",domain,str(plist)],check=True)

@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Configure a fixed SOCKS5 exit and an optional HTTP CONNECT first hop."""
+import getpass
+import ipaddress
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import uuid
+
+DIRECTORY = Path(os.environ.get("DOW_CONFIG_DIR", Path.home() / ".config/dow"))
+CONFIG = DIRECTORY / "network.json"
+
+
+def endpoint(address, port):
+    number = int(port)
+    if not 1 <= number <= 65535:
+        raise ValueError("端口应在 1–65535 之间")
+    return {"server": str(ipaddress.IPv4Address(address)), "server_port": number}
+
+
+def write_private(path, content):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as tmp:
+        try:
+            tmp.write(content)
+            tmp.flush()
+            os.replace(tmp.name, path)
+        finally:
+            Path(tmp.name).unlink(missing_ok=True)
+
+
+def configure():
+    expected = str(ipaddress.IPv4Address(input("网站应看到的固定出口 IPv4：").strip()))
+    socks = endpoint(input("SOCKS5 代理的 IPv4 地址：").strip(), input("SOCKS5 端口：").strip())
+    username = input("SOCKS5 用户名（无认证时留空）：").strip()
+    if username:
+        socks.update(username=username, password=getpass.getpass("SOCKS5 密码："))
+    first = input("可选前置 HTTP 代理的 IPv4 地址（没有请回车）：").strip()
+    hop = endpoint(first, input("前置 HTTP 端口：").strip()) if first else None
+    data = dict(expected=expected, socks=socks, hop=hop, revision=str(uuid.uuid4()))
+    write_private(CONFIG, json.dumps(data, indent=2) + "\n")
+    print("设置已保存。运行 ./deploy 应用设置。")
+
+
+def main(args):
+    if not args:
+        configure()
+        return
+    data = json.loads(CONFIG.read_text())
+    socks = data["socks"]
+    remote = endpoint(socks["server"], socks["server_port"])
+    if socks.get("username"):
+        remote.update(username=socks["username"], password=socks["password"])
+    hop = data.get("hop")
+    first = endpoint(hop["server"], hop["server_port"]) if hop else remote
+    expected = str(ipaddress.IPv4Address(data["expected"]))
+    revision = str(uuid.UUID(data["revision"]))
+    if len(args) == 2:
+        action, required = args
+        if revision != required:
+            raise ValueError("安装期间配置已更改。请重新运行 ./deploy")
+        args = [action]
+    if args == ["first-ip"]:
+        print(first["server"])
+    elif args == ["first-port"]:
+        print(first["server_port"])
+    elif args == ["revision"]:
+        print(revision)
+    elif args == ["activate"]:
+        write_private(DIRECTORY / "expected-ip", expected + "\n")
+    elif args == ["gateway"]:
+        if sys.stdout.isatty():
+            raise ValueError("代理配置仅供安装程序从管道读取")
+        outbounds = [dict(type="socks", tag="fixed", version="5", network="tcp", **remote)]
+        if hop:
+            outbounds[0]["detour"] = "first"
+            outbounds.append(dict(type="http", tag="first", **first))
+        print(json.dumps(dict(log=dict(level="warn"), inbounds=[dict(type="mixed", listen="127.0.0.1", listen_port=7890)],
+                             outbounds=outbounds, route=dict(final="fixed"))))
+    else:
+        raise ValueError("请直接运行 ./configure")
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except (ValueError, KeyError, OSError, EOFError, KeyboardInterrupt) as error:
+        sys.exit(f"配置未就绪：{error}")

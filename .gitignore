@@ -1,0 +1,13 @@
+.DS_Store
+node_modules/
+__pycache__/
+*.pyc
+*.app/
+*.tgz
+*.log
+.env
+.env.*
+network.json
+proxy.json
+expected-ip
+dist/

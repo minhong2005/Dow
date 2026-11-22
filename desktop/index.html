@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'">
+  <title>Dow</title>
+  <link rel="stylesheet" href="vendor/xterm.css"><link rel="stylesheet" href="style.css"><link rel="stylesheet" href="symbols.css">
+</head>
+<body>
+  <div id="rail" role="toolbar" aria-label="工作台导航">
+    <button id="explorer" class="rail-action" data-action="explorer" title="项目侧栏  ⌘B" aria-label="项目侧栏" aria-expanded="true" aria-controls="sidebar"><i class="icon i-explorer"></i></button>
+    <button class="rail-action" data-action="search" title="查找会话  ⌘P" aria-label="查找会话"><i class="icon i-search"></i></button>
+    <button class="rail-action" data-action="compare" title="并排查看" aria-label="并排查看"><i class="icon i-split"></i></button>
+    <button class="rail-action rail-bottom" data-action="browser" title="专用 Chrome" aria-label="打开专用 Chrome"><i class="icon i-globe"></i></button>
+  </div>
+  <aside id="sidebar" aria-label="项目资源管理器">
+    <div class="side-heading"><span>资源管理器</span><button class="square" title="新建会话  ⌘N" data-action="new" aria-label="新建会话"><i class="icon i-plus"></i></button></div>
+    <button id="homeNav" class="side-home" data-action="home"><i class="icon i-home"></i>会话总览</button>
+    <div class="tree-heading">项目会话</div>
+    <nav id="nav" aria-label="按项目查找会话"></nav>
+  </aside>
+  <main>
+    <div class="editor-bar"><div id="tabs" aria-label="已打开的视图"></div>
+      <div class="editor-actions"><button class="square" id="compareButton" data-action="compare" title="并排查看" aria-label="并排查看"><i class="icon i-split"></i></button><button class="square" data-action="new" title="新建会话  ⌘N" aria-label="新建会话"><i class="icon i-plus"></i></button></div>
+    </div>
+    <section id="home" aria-label="会话总览">
+      <div class="welcome">
+        <div class="welcome-brand"><img src="icons/dow.png" alt=""><h1>Dow</h1></div>
+        <p class="welcome-subtitle">会话工作台</p>
+        <div class="welcome-columns">
+          <section><h2>启动工具</h2><div id="tools"></div></section>
+          <section><div class="section-title"><h2>全部会话</h2><span id="total"></span></div><div id="table"></div></section>
+        </div>
+        <div class="welcome-commands">
+          <button data-action="search"><i class="icon i-search"></i>查找会话<kbd>⌘P</kbd></button>
+          <button data-action="compare"><i class="icon i-split"></i>并排查看</button>
+          <button data-action="browser"><i class="icon i-globe"></i>专用 Chrome<i class="icon i-arrow"></i></button>
+        </div>
+      </div>
+    </section>
+    <section id="desk" hidden aria-label="会话视图"></section>
+  </main>
+  <footer>
+    <div class="exits" role="group" aria-label="网络出口">
+      <button id="terminalExit" class="network" data-action="reconnect" title="重新检测终端出口"><i class="dot waiting"></i>终端出口<span class="exit-value">检测中</span></button>
+      <button id="browserExit" class="network" data-action="check-browser" title="用专用 Chrome 打开临时检测页"><i class="dot"></i>浏览器出口<span class="exit-value">未检测</span></button>
+    </div>
+    <span class="foot-sessions"><i class="icon i-terminal"></i><span id="summary">正在读取会话…</span></span>
+  </footer>
+  <div id="menu" hidden></div><div id="toast" role="status" aria-live="polite" hidden></div>
+  <dialog id="quick" aria-label="查找会话"><label class="quick-input"><i class="icon i-search"></i><input id="filter" placeholder="按名称、项目或工具查找会话" aria-label="查找会话" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="results" aria-expanded="true"><kbd>esc</kbd></label><div id="results" role="listbox" aria-label="匹配的会话"></div></dialog>
+  <dialog id="dialog" aria-labelledby="modalTitle"><form id="form">
+    <div class="dialog-heading"><h2 id="modalTitle"></h2><button type="button" class="square" data-action="dismiss" aria-label="关闭"><i class="icon i-close"></i></button></div>
+    <div id="fields"></div><div class="dialog-actions"><button type="button" class="secondary" data-action="dismiss">取消</button><button type="submit" id="submit" class="primary">确定</button></div><p class="error" id="formError" hidden></p>
+  </form></dialog>
+  <script src="vendor/xterm.js"></script><script src="vendor/addon-fit.js"></script><script src="vendor/addon-web-links.js"></script><script src="app.js"></script>
+</body></html>

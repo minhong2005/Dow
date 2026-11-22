@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""Independent task terminals on the default tmux server and disposable views on a second server."""
+import curses
+import fcntl
+import json
+import locale
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import unicodedata
+import uuid
+
+APP = "/usr/local/bin/aiwork-sessions"
+TOOL_NAMES = {"claude": "Claude Code", "codex": "Codex", "agy": "Antigravity"}
+TOOLS = tuple(TOOL_NAMES)
+UI = "aiwork-views"
+BACK = "default"
+env = dict(os.environ, LANG="C.UTF-8", LC_ALL="C.UTF-8", BROWSER="/usr/local/bin/browser-open")
+env.pop("TMUX", None)
+env.pop("TMUX_PANE", None)
+
+
+def launcher(tool):
+    return "/usr/local/bin/dow-codex" if tool == "codex" else tool
+
+
+def tm(server, *args, optional=False):
+    p = subprocess.run(["tmux", "-u", "-L", server, *args], env=env,
+                       text=True, capture_output=True)
+    if p.returncode and not optional:
+        raise RuntimeError(p.stderr.strip() or "tmux 操作失败")
+    return p.stdout.strip()
+
+
+def display_title(tool, title):
+    # Old sessions stored the executable name as their automatic title.
+    base, suffix = (re.fullmatch(r"(.*?)( [0-9]+)?", title).groups())
+    if base == tool or (tool == "agy" and base == "反重力"):
+        return TOOL_NAMES[tool] + (suffix or "")
+    return title
+
+
+def jobs():
+    rows = tm(BACK, "list-panes", "-a", "-F",
+              "#{session_name}\t#{@project}\t#{@tool}\t#{@task}\t#{pane_dead}", optional=True)
+    result = []
+    for line in rows.splitlines():
+        cols = line.split("\t")
+        if len(cols) == 5 and cols[0].startswith("job-") and cols[2] in TOOLS:
+            cols[3] = display_title(cols[2], cols[3])
+            result.append(cols)
+    return sorted(result, key=lambda r: (r[1], r[3], r[0]))
+
+
+def api(args):
+    action, *params = args
+    rows = jobs()
+    if action == "list" and not params:
+        return [dict(id=i, project=p, tool=t, title=n, exited=(d=="1")) for i,p,t,n,d in rows]
+    if any(len(p)>100 or any(ord(c)<32 or ord(c)==127 for c in p) for p in params):
+        raise ValueError("名称中含有无效字符，或名称过长")
+    if action=="preset" and len(params)==1:
+        project=params[0].strip() or "main"
+        return [next((r[0] for r in rows if r[1]==project and r[2]==tool and r[4]=="0"),None)
+                or api(["create",tool,project,""]) for tool in TOOLS]
+    if action == "create" and len(params)==3:
+        tool, project, title = params
+        if tool not in TOOLS:
+            raise ValueError("请选择有效的工具")
+        project, title = project.strip() or "main", title.strip()
+        if not title:
+            titles = {r[3] for r in rows if r[1]==project}
+            title = TOOL_NAMES[tool]
+            suffix = 2
+            while title in titles:
+                title = f"{TOOL_NAMES[tool]} {suffix}"
+                suffix += 1
+        return create(tool,project,title)
+    row = next((r for r in rows if params and r[0]==params[0]),None)
+    if row is None:
+        raise ValueError("会话已不存在")
+    ident, project, tool, _, dead = row
+    if action == "rename" and len(params)==2 and params[1].strip():
+        tm(BACK,"set-option","-t","="+ident,"@task",params[1].strip())
+    elif action == "end" and len(params)==1:
+        tm(BACK,"kill-session","-t","="+ident)
+    elif action == "restart" and len(params)==1:
+        if dead=="1":
+            tm(BACK,"respawn-pane","-t","="+ident+":","-c","/work/"+project,launcher(tool))
+    else:
+        raise ValueError("不支持的会话操作")
+    return ident
+
+
+def create(tool, project, title, old_pane=None):
+    if tool not in TOOLS or not project or project in (".", "..") or "/" in project:
+        raise ValueError("请输入有效的项目名称")
+    folder = (Path("/work") / project).resolve()
+    if folder.parent != Path("/work"):
+        raise ValueError("请选择工作区内的项目")
+    folder.mkdir(exist_ok=True)
+    job = "job-" + uuid.uuid4().hex[:12]
+    # During adoption, swap the existing PTY into its new session. Its original
+    # position becomes a client of that same PTY. The tool process keeps its PID.
+    gate = f"tmux -L {shlex.quote(BACK)} wait-for {job}"
+    cmd = gate + "; exec " + (launcher(tool) if old_pane is None else
+                              f"env -u TMUX tmux -L {shlex.quote(BACK)} attach -t ={job}")
+    placeholder = tm(BACK, "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", job,
+                     "-x", "140", "-y", "38", "-c", str(folder), cmd)
+    for key, value in (("status", "off"), ("@project", project), ("@task", display_title(tool, title)), ("@tool", tool)):
+        tm(BACK, "set-option", "-t", job, key, value)
+    tm(BACK, "set-window-option", "-t", job, "remain-on-exit", "on")
+    if old_pane:
+        try:
+            tm(BACK, "swap-pane", "-d", "-s", old_pane, "-t", placeholder)
+        except RuntimeError:
+            tm(BACK, "kill-session", "-t", job)
+            raise
+        tm(BACK, "set-option", "-p", "-t", placeholder, "@view_of", job)
+        tm(BACK, "set-option", "-p", "-t", placeholder, "@grid_tool", tool)
+    tm(BACK, "wait-for", "-S", job)
+    return job
+
+
+def adopt_grid():
+    lines = tm(BACK, "list-panes", "-t", "=AI-desk:", "-F",
+               "#{pane_id} #{@grid_tool} #{@view_of}", optional=True)
+    for line in lines.splitlines():
+        row = line.split()
+        if len(row) == 2 and row[1] in TOOLS:
+            create(row[1], "main", row[1], row[0])
+
+
+def windows():
+    return tm(UI, "list-windows", "-t", "Desk", "-F",
+              "#{window_id}\t#{@members}").splitlines()
+
+
+def show(ids):
+    catalog = {r[0]: r for r in jobs()}
+    if not ids or any(j not in catalog for j in ids):
+        raise ValueError("会话已结束或不存在")
+    members = ",".join(ids)
+    for line in windows():
+        if line.endswith("\t" + members):
+            tm(UI, "select-window", "-t", line.split("\t")[0])
+            return
+    def client(job):
+        return f"exec env -u TMUX -u TMUX_PANE tmux -u -L {shlex.quote(BACK)} attach-session -t ={job}"
+    _, project, tool, title, _ = catalog[ids[0]]
+    label = f"{project}/{title}" if len(ids) == 1 else f"对照·{len(ids)}"
+    window = tm(UI, "new-window", "-d", "-P", "-F", "#{window_id}", "-t", "Desk:",
+                "-n", label, client(ids[0]))
+    try:
+        for i, job in enumerate(ids):
+            if i:
+                sizes = [line.split() for line in tm(UI, "list-panes", "-t", window, "-F",
+                         "#{pane_id} #{pane_width} #{pane_height}").splitlines()]
+                pane, w, h = max(sizes, key=lambda p: int(p[1])*int(p[2]))
+                direction = "-h" if int(w) > int(h)*2 else "-v"
+                tm(UI, "split-window", "-d", direction, "-t", pane, client(job))
+                tm(UI, "select-layout", "-t", window, "tiled")
+            pane = tm(UI, "list-panes", "-t", window, "-F", "#{pane_id} #{@ai_job}")
+            unassigned = next(x.split()[0] for x in pane.splitlines() if len(x.split()) == 1)
+            tm(UI, "set-option", "-p", "-t", unassigned, "@ai_job", job)
+            tm(UI, "set-option", "-p", "-t", unassigned, "@ai_title",
+               catalog[job][1] + "/" + catalog[job][3] + " · " + TOOL_NAMES[catalog[job][2]])
+        tm(UI, "set-option", "-w", "-t", window, "pane-border-status", "top" if len(ids)>1 else "off")
+        tm(UI, "set-option", "-w", "-t", window, "pane-border-format", " #{@ai_title} ")
+        tm(UI, "set-option", "-w", "-t", window, "@members", members)
+        tm(UI, "select-window", "-t", window)
+    except Exception:
+        tm(UI, "kill-window", "-t", window, optional=True)
+        raise
+
+
+def init():
+    with open("/tmp/aiwork-session-init.lock","a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not tm(UI, "display-message", "-p", "-t", "=Desk:", "#{session_id}", optional=True):
+            tm(UI, "new-session", "-d", "-s", "Desk", "-n", "会话目录", "-x","140","-y","38", APP+" menu")
+        home = tm(UI,"list-windows","-t","Desk","-F","#{window_id}").splitlines()[0]
+        tm(UI,"set-option","-t","Desk","mouse","on")
+        tm(UI,"set-option","-t","Desk","status-left"," 目录 │")
+        tm(UI,"bind-key","-n","MouseDown1StatusLeft","select-window","-t",home)
+        tm(UI,"set-option","-t","Desk","status-right"," F2 目录 · F7/F8 切换 · F9 收起视图 ")
+        for key, cmd in (("F2",["select-window","-t",home]),("F7",["previous-window"]),("F8",["next-window"])):
+            tm(UI,"bind-key","-n",key,*cmd)
+        # Closing a view disconnects its clients. The job server is independent.
+        tm(UI,"bind-key","-n","F9","if-shell","-F","#{@members}","kill-window","")
+        adopt_grid()
+
+
+def menu(screen):
+    curses.curs_set(0)
+    curses.mousemask(curses.ALL_MOUSE_EVENTS)
+    curses.mouseinterval(150)
+    current = 0
+    selected = set()
+    message = ""
+    project = "main"
+    def ask(prompt, default=""):
+        height,width = screen.getmaxyx()
+        screen.move(height-1,0); screen.clrtoeol()
+        text = prompt + (f" [{default}]" if default else "") + "："
+        screen.addstr(height-1,0,text)
+        curses.echo(); curses.curs_set(1)
+        try:
+            value=screen.getstr().decode(errors="replace").strip() or default
+            if any(ord(c)<32 for c in value):
+                raise ValueError("名称含有无效字符")
+            return value
+        finally:
+            curses.noecho(); curses.curs_set(0)
+    while True:
+        rows = jobs()
+        selected.intersection_update(r[0] for r in rows)
+        current = min(current,max(0,len(rows)-1))
+        h,w = screen.getmaxyx()
+        page = max(1,h-8)
+        offset = max(0,current-page+1)
+        screen.erase()
+        def draw(y, text, style=0):
+            if 0<=y<h-1:
+                try: screen.addnstr(y,0,text,max(1,w-1),style)
+                except curses.error: pass
+        draw(0,"会话目录",curses.A_BOLD)
+        buttons = (("N 新建会话", ord("n")), ("Enter 打开", 10),
+                   ("G 并排", ord("g")), ("A 三工具布局", ord("a")), ("B 浏览器", ord("b")))
+        button_ranges = []
+        x = 0
+        for label, action in buttons:
+            width = sum(2 if unicodedata.east_asian_width(c) in ("W","F") else 1 for c in label)
+            if x + width < w and h > 2:
+                screen.addstr(1,x,label,curses.A_UNDERLINE)
+                button_ranges.append((x,x+width,action))
+            x += width + 3
+        draw(2,"点击名称打开，点击方框勾选。底部标签可直接切换。")
+        for i,r in enumerate(rows[offset:offset+page]):
+            tag="[✓]" if r[0] in selected else "[ ]"
+            state="已退出" if r[4]=="1" else "运行中"
+            draw(i+4,f"{tag}  {r[1]}  /  {r[3]}    {TOOL_NAMES[r[2]]}    {state}",curses.A_REVERSE if offset+i==current else 0)
+        draw(h-3,message or ("按 N 开第一个会话" if not rows else f"{len(rows)} 个会话 · 已选 {len(selected)} 个"))
+        draw(h-2,"↑↓ 选择   R 重启已退出会话   X 结束所选会话   P 项目")
+        screen.refresh(); screen.timeout(1200)
+        key=screen.getch()
+        if key==-1: continue
+        screen.timeout(-1)
+        try:
+            if key==curses.KEY_MOUSE:
+                _,x,y,_,buttons=curses.getmouse()
+                if buttons & curses.BUTTON4_PRESSED: key=curses.KEY_UP
+                elif buttons & getattr(curses,"BUTTON5_PRESSED",0): key=curses.KEY_DOWN
+                elif buttons & (curses.BUTTON1_CLICKED|curses.BUTTON1_RELEASED):
+                    if 4<=y<4+len(rows[offset:offset+page]):
+                        current=offset+y-4; key=32 if x<4 else 10
+                    elif y==1: key=next((k for left,right,k in button_ranges if left<=x<right),-1)
+                    else: continue
+                else: continue
+            if key==curses.KEY_UP: current=max(0,current-1)
+            elif key==curses.KEY_DOWN: current=min(len(rows)-1,current+1)
+            elif key in (ord('b'),ord('B')):
+                result = subprocess.run(["/usr/local/bin/browser-open","--show"],text=True,capture_output=True)
+                message = "已打开工作台 Chrome" if result.returncode==0 else result.stderr.strip()
+            elif key in (ord('p'),ord('P')):
+                project=ask("项目名称",project); message="新会话项目："+project
+            elif key in (ord('n'),ord('N')):
+                tool=ask("  ".join(f"{i} {TOOL_NAMES[name]}" for i,name in enumerate(TOOLS,1)))
+                if tool not in {str(i) for i in range(1,len(TOOLS)+1)}:continue
+                app=TOOLS[int(tool)-1]; project=ask("项目",project)
+                title=ask("任务名",TOOL_NAMES[app])
+                show([create(app,project,title)])
+            elif key in (ord('a'),ord('A')):
+                project=ask("三工具所在项目",project)
+                ids=[]
+                for app in TOOLS:
+                    live=next((r[0] for r in rows if r[1]==project and r[2]==app and r[4]=="0"),None)
+                    ids.append(live or create(app,project,app))
+                show(ids)
+            elif rows and key==32:
+                j=rows[current][0]
+                if j in selected:selected.remove(j)
+                else:selected.add(j)
+            elif key in (ord('g'),ord('G')):
+                if len(selected)<2:message="先勾选至少两个会话";continue
+                show([r[0] for r in rows if r[0] in selected]);selected.clear()
+            elif rows and key in (10,13,curses.KEY_ENTER):show([rows[current][0]])
+            elif rows and key in (ord('r'),ord('R')) and rows[current][4]=="1":
+                row=rows[current]; tm(BACK,"respawn-pane","-t",row[0],"-c","/work/"+row[1],launcher(row[2])); show([row[0]])
+            elif rows and key in (ord('x'),ord('X')):
+                row=rows[current]
+                if ask("结束 "+row[1]+"/"+row[3]+"？输入 yes")=="yes":tm(BACK,"kill-session","-t",row[0])
+        except (ValueError, RuntimeError, OSError, curses.error) as e:
+            message=str(e)
+
+
+if __name__=="__main__":
+    locale.setlocale(locale.LC_ALL,"C.UTF-8")
+    if sys.argv[1:2]==["api"]:
+        try:
+            with open("/tmp/aiwork-session-api.lock","a") as lock:
+                fcntl.flock(lock,fcntl.LOCK_EX)
+                print(json.dumps(api(sys.argv[2:]),ensure_ascii=False))
+        except (ValueError, RuntimeError, OSError) as e:
+            sys.exit(str(e))
+    elif sys.argv[1:]==["init"]:init()
+    elif sys.argv[1:]==["preset"]:
+        init()
+        rows=jobs()
+        show([next((r[0] for r in rows if r[1]=="main" and r[2]==app and r[4]=="0"),None)
+              or create(app,"main",app) for app in TOOLS])
+    elif sys.argv[1:]==["menu"]:curses.wrapper(menu)

@@ -1,0 +1,8 @@
+(version 1)
+(allow default)
+; Native commands may open IP sockets only to Dow's monitored loopback proxy.
+(deny network*)
+(allow network-outbound (remote ip "localhost:39175"))
+(deny mach-lookup (global-name "com.apple.mDNSResponder")
+                  (global-name "com.apple.nsurlsessiond")
+                  (global-name "com.apple.nsurlsessiond-info"))

@@ -1,0 +1,76 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")"
+dc() { docker --context colima-dow "$@"; }
+revision=$(./configure revision)
+upstream=$(./configure first-ip "$revision")
+port=$(./configure first-port "$revision")
+projects=${DOW_PROJECTS:-"$HOME/DowProjects"}
+mkdir -p "$projects"
+projects=$(cd "$projects" && pwd -P)
+if ! dc info >/dev/null 2>&1; then
+  colima start dow --activate=false --arch aarch64 --vm-type vz --runtime docker --mount "$projects:w"
+fi
+if dc inspect aiwork-gateway >/dev/null 2>&1; then
+  active=$(dc inspect -f '{{index .Config.Labels "org.dow.config"}}' aiwork-gateway)
+  if [ "$active" != "$revision" ]; then
+    echo '配置已更改。请按 README「更换代理」步骤重建网关。' >&2
+    exit 1
+  fi
+fi
+if dc inspect aiwork-tools >/dev/null 2>&1; then
+  mounted=$(dc inspect -f '{{range .Mounts}}{{if eq .Destination "/work"}}{{.Source}}{{end}}{{end}}' aiwork-tools)
+  if [ "$mounted" != "$projects" ]; then echo "当前容器的项目目录不同。" >&2; exit 1; fi
+fi
+if ! dc image inspect aiwork-devbase:1 >/dev/null 2>&1; then
+  dc build -t aiwork-devbase:1 workspace-base
+fi
+python3 assets.py
+buildctx=$(mktemp -d)
+trap 'rm -rf "$buildctx"' EXIT
+mkdir "$buildctx/gateway"
+cp gateway/{Dockerfile,start.sh} "$buildctx/gateway/"
+ln "${DOW_CACHE_DIR:-$HOME/Library/Caches/Dow}/singbox.tgz" "$buildctx/gateway/" || cp "${DOW_CACHE_DIR:-$HOME/Library/Caches/Dow}/singbox.tgz" "$buildctx/gateway/"
+dc build -t aiwork-gateway:1 "$buildctx/gateway"
+mkdir "$buildctx/tools"
+cp workspace/{Dockerfile,exit-ip,aiwork-grid,browser-open,aiwork-sessions,aiwork-native-requests,aiwork-gui-pty,dow-codex,dow-mac,install-mac-tool} "$buildctx/tools/"
+for archive in agy codex claude; do
+  ln "${DOW_CACHE_DIR:-$HOME/Library/Caches/Dow}/$archive.tgz" "$buildctx/tools/" || cp "${DOW_CACHE_DIR:-$HOME/Library/Caches/Dow}/$archive.tgz" "$buildctx/tools/"
+done
+dc build --build-arg DEV_UID="$(id -u)" -t aiwork-tools:1 "$buildctx/tools"
+if ! dc container inspect aiwork-gateway >/dev/null 2>&1; then
+  dc create --name aiwork-gateway --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID \
+    --security-opt no-new-privileges --sysctl net.ipv6.conf.all.disable_ipv6=1 \
+    --label "org.dow.config=$revision" -e UPSTREAM_IP="$upstream" -e UPSTREAM_PORT="$port" -v aiwork-link:/link aiwork-gateway:1 >/dev/null
+fi
+# Write the credential only into the gateway, without a host temp file or shell argument.
+if [ "$(dc inspect -f '{{.State.Running}}' aiwork-gateway)" = false ]; then
+  ./configure gateway "$revision" | python3 -c '
+import io, sys, tarfile
+data = sys.stdin.buffer.read()
+if not data: sys.exit("missing proxy configuration")
+with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as archive:
+    entry = tarfile.TarInfo("proxy.json")
+    entry.size, entry.uid, entry.gid, entry.mode = len(data), 65532, 65532, 0o400
+    archive.addfile(entry, io.BytesIO(data))
+' | dc cp -a - aiwork-gateway:/config
+  dc start aiwork-gateway >/dev/null
+fi
+for attempt in {1..30}; do
+  if dc exec aiwork-gateway sh -c 'test -S /link/out.sock && socat -u /dev/null TCP4:127.0.0.1:7890,connect-timeout=1' >/dev/null 2>&1; then
+    break
+  fi
+  if [ "$attempt" -eq 30 ]; then echo '网关未能启动，请查看专用网关日志。' >&2; exit 1; fi
+  sleep 0.3
+done
+./configure activate "$revision"
+if ! dc container inspect aiwork-tools >/dev/null 2>&1; then
+  dc create --name aiwork-tools --init --network none --cap-drop ALL \
+    --security-opt no-new-privileges -v aiwork-link:/link:ro -v aiwork-home:/home/node \
+    --mount "type=bind,src=$projects,dst=/work" aiwork-tools:1 >/dev/null
+fi
+dc start aiwork-tools >/dev/null
+dc exec aiwork-tools mkdir -p /work/main
+./codex/install
+for entry in dow-mac install-mac-tool; do dc cp "workspace/$entry" "aiwork-tools:/usr/local/bin/$entry"; done
+dc exec aiwork-tools install-mac-tool

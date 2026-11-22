@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Open links in the firewall-protected native Chrome."""
+import json
+from pathlib import Path
+import socket
+import sys
+from urllib.parse import urlsplit
+
+if len(sys.argv) != 2:
+    sys.exit("用法：browser-open 网页链接，或 browser-open --show")
+link = sys.argv[1]
+request = {"action":"show"}
+if link != "--show":
+    try:
+        parts = urlsplit(link)
+        valid = parts.scheme in ("http","https") and parts.hostname and len(link)<=30000 and all(ord(c)>=32 for c in link)
+    except ValueError:
+        valid = False
+    if not valid:
+        sys.exit("工作台 Chrome 只接受 HTTP 或 HTTPS 链接。")
+    request = {"action":"open","url":link}
+try:
+    with socket.socket(socket.AF_UNIX) as conn:
+        conn.settimeout(35)
+        conn.connect(str(Path.home()/".local/state/aiwork/native.sock"))
+        conn.sendall(json.dumps(request).encode()+b"\n")
+        result = json.loads(conn.makefile("rb").readline(65536))
+except (OSError,ValueError):
+    sys.exit("独立 Chrome 或它的网络保护尚未就绪，请稍后重试。")
+if not result.get("ok"):
+    sys.exit(result.get("error","工作台 Chrome 未能打开。"))

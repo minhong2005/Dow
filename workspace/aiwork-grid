@@ -1,0 +1,39 @@
+#!/bin/bash
+set -eu
+# Serialize first-time setup when two terminal windows are opened together.
+exec 9>"/tmp/aiwork-grid-$(id -u).lock"
+flock 9
+session=AI-desk
+if ! tmux has-session -t "=$session" 2>/dev/null; then
+  if tmux has-session -t '=AI-claude' 2>/dev/null; then
+    # Share the existing window so the running Claude process keeps its history.
+    tmux new-session -d -s "$session" -t AI-claude
+  else
+    tmux new-session -d -x 160 -y 48 -s "$session" -n tools -c /work/main claude
+  fi
+fi
+window=$(tmux list-windows -t "=$session" -F '#{window_id}' | head -1)
+tmux set-option -t "$session" mouse on
+if tmux has-session -t '=AI-claude' 2>/dev/null; then
+  tmux set-option -t AI-claude mouse on
+fi
+tmux set-option -w -t "$window" remain-on-exit on
+tmux set-option -w -t "$window" pane-border-status top
+tmux set-option -w -t "$window" pane-border-format ' #{@grid_tool} '
+first=$(tmux list-panes -t "$window" -F '#{pane_id}' | head -1)
+tmux set-option -p -t "$first" @grid_tool claude
+for tool in claude codex agy; do
+  command=$tool
+  if [ "$tool" = codex ]; then command=/usr/local/bin/dow-codex; fi
+  pane=$(tmux list-panes -t "$window" -F '#{@grid_tool} #{pane_id}' | awk -v tool="$tool" '$1==tool {print $2;exit}')
+  if [ -z "$pane" ]; then
+    case "$tool" in
+      codex) axis=-h; target=$first ;;
+      agy) axis=-v; target=$first ;;
+    esac
+    pane=$(tmux split-window -d "$axis" -t "$target" -c /work/main -P -F '#{pane_id}' "$command")
+    tmux set-option -p -t "$pane" @grid_tool "$tool"
+  elif [ "$(tmux display-message -p -t "$pane" '#{pane_dead}')" = 1 ]; then
+    tmux respawn-pane -t "$pane" -c /work/main "$command"
+  fi
+done

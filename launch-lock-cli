@@ -1,0 +1,116 @@
+#!/usr/bin/python3
+"""Disable or restore this user's standalone macOS AI CLI installations."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import stat
+import subprocess
+import sys
+
+HOME = Path.home()
+STATE = HOME / "Library/Application Support/dow-launch-lock"
+SAVED = STATE / "originals"
+PLAN = STATE / "cli.json"
+
+LOCAL = HOME / ".local/bin"
+PACKAGES = ("@openai/codex", "@anthropic-ai/claude-code")
+STUB = b"#!/bin/sh\nprintf '%s\\n' '" + "这个工具只允许在 Dow 中启动。请打开 Dow，选择工具。".encode() + b"' >&2\nexit 126\n"
+
+
+def exists(path):
+    return os.path.lexists(path)
+
+
+def is_stub(path):
+    return not path.is_symlink() and path.is_file() and path.stat().st_size == len(STUB) and path.read_bytes() == STUB
+
+
+def plan():
+    npm = Path(subprocess.check_output(["npm","prefix","-g"],text=True).strip()).resolve()
+    moves = []
+    entries = {LOCAL / name for name in ("agy", "codex", "claude")}
+    for name in PACKAGES:
+        package = npm / "lib/node_modules" / name
+        if not package.is_dir():
+            continue
+        metadata = json.loads((package / "package.json").read_text())
+        if package.is_symlink() or metadata["name"] != name:
+            raise RuntimeError(f"无法核实原安装：{package}")
+        for command in metadata["bin"]:
+            entry = npm / "bin" / command
+            if not entry.is_symlink() or package.resolve() not in entry.resolve().parents:
+                raise RuntimeError(f"无法核实原命令：{entry}")
+            entries.add(entry)
+        moves.append((package, SAVED / name.replace("/", "_")))
+    for entry in sorted(entries):
+        if not exists(entry):
+            continue
+        if entry.parent == LOCAL and (entry.name != "agy" or entry.is_symlink()):
+            raise RuntimeError(f"已有其他命令占用：{entry}")
+        moves.append((entry, SAVED / (("local-" if entry.parent == LOCAL else "npm-") + entry.name)))
+    return {"moves": [[str(a), str(b)] for a, b in moves], "entries": sorted(map(str, entries))}
+
+
+def restore(data):
+    SAVED.chmod(0o700)
+    for src, saved in data["moves"]:
+        if exists(saved) and exists(src) and not is_stub(Path(src)):
+            SAVED.chmod(0o600)
+            raise RuntimeError(f"原路径已有新内容，备份保留在 {saved}")
+    for entry in map(Path, data["entries"]):
+        if is_stub(entry):
+            os.chflags(entry, entry.stat().st_flags & ~stat.UF_IMMUTABLE)
+            entry.unlink()
+    for src, saved in reversed(data["moves"]):
+        src, saved = Path(src), Path(saved)
+        if exists(saved):
+            if exists(src):
+                raise RuntimeError(f"原路径已有新内容，备份保留在 {saved}")
+            saved.rename(src)
+    PLAN.unlink(missing_ok=True)
+
+
+def lock():
+    if PLAN.exists():
+        data = json.loads(PLAN.read_text())
+        if all(is_stub(Path(p)) for p in data["entries"]) and stat.S_IMODE(SAVED.stat().st_mode) == 0o600:
+            print("宿主机 CLI 入口锁已启用。")
+            return
+        raise RuntimeError("已有未完成的安装记录，请先运行 unlock 恢复。")
+    LOCAL.mkdir(parents=True, exist_ok=True)
+    data = plan()
+    SAVED.mkdir(mode=0o700, exist_ok=True)
+    if any(SAVED.iterdir()):
+        raise RuntimeError("备份目录已有内容，已停止。")
+    temp = STATE / "cli.new"
+    temp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    temp.replace(PLAN)
+    try:
+        for src, saved in data["moves"]:
+            Path(src).rename(saved)
+        for entry in map(Path, data["entries"]):
+            with entry.open("xb") as out:
+                out.write(STUB)
+            entry.chmod(0o755)
+            # Prevent an ordinary npm install/update from replacing our public command.
+            os.chflags(entry, entry.stat().st_flags | stat.UF_IMMUTABLE)
+        SAVED.chmod(0o600)
+    except BaseException:
+        restore(data)
+        raise
+    print(f"已锁定 {len(data['entries'])} 个宿主机命令入口。")
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] not in (["lock"], ["unlock"]):
+        sys.exit("用法：launch-lock-cli lock | unlock")
+    os.umask(0o077)
+    STATE.mkdir(exist_ok=True, mode=0o700)
+    with (STATE / "cli.lock").open("a") as mutex:
+        fcntl.flock(mutex, fcntl.LOCK_EX)
+        if sys.argv[1] == "lock":
+            lock()
+        elif PLAN.is_file():
+            restore(json.loads(PLAN.read_text()))
+            print("原来的宿主机命令已恢复。")

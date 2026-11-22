@@ -1,0 +1,57 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")"
+dc() { docker --context colima-dow "$@"; }
+vm() { colima ssh --profile dow -- "$@"; }
+if [ "$(dc inspect -f '{{.HostConfig.NetworkMode}}' aiwork-tools)" != none ]; then
+  echo '工作区直连限制未就绪。' >&2
+  exit 1
+fi
+build=$(mktemp -d)
+trap 'rm -rf "$build"' EXIT
+cp Dockerfile start ../workspace/browser-open "$build/"
+dc build --network none --pull=false -t dow-codex:1 "$build"
+# Extend the existing unprivileged namespace policy only for the Codex container.
+python3 - seccomp.json "$build/seccomp.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as f:
+    profile=json.load(f)
+profile["syscalls"].append({
+    "names":["mount","umount2","pivot_root","mount_setattr","open_tree","move_mount","sethostname"],
+    "action":"SCMP_ACT_ALLOW",
+    "comment":"bubblewrap sets up the Codex filesystem within an unprivileged user namespace."
+})
+with open(sys.argv[2],"w") as f:
+    json.dump(profile, f)
+PY
+# Loading a named profile leaves docker-default and the other tools untouched.
+vm sudo apparmor_parser -Q -T < apparmor
+vm sudo tee /etc/apparmor.d/dow-codex < apparmor >/dev/null
+vm sudo apparmor_parser -r -T /etc/apparmor.d/dow-codex
+dc exec aiwork-tools sh -ec 'umask 077; mkdir -p "$HOME/.codex" "$HOME/.local/state/aiwork" "$HOME/.local/state/aiwork-codex"'
+projects=$(dc inspect -f '{{range .Mounts}}{{if eq .Destination "/work"}}{{.Source}}{{end}}{{end}}' aiwork-tools)
+uid=$(dc exec aiwork-tools id -u)
+gid=$(dc exec aiwork-tools id -g)
+if ! dc inspect aiwork-codex >/dev/null 2>&1; then
+  dc create --name aiwork-codex --init --network container:aiwork-tools \
+    --cap-drop ALL --security-opt no-new-privileges --security-opt apparmor=dow-codex \
+    --security-opt "seccomp=$build/seccomp.json" --read-only \
+    --tmpfs /tmp:rw,nosuid,nodev,mode=1777 \
+    --tmpfs "/home/node:rw,nosuid,nodev,uid=$uid,gid=$gid,mode=700" \
+    --mount "type=bind,src=$projects,dst=/work" \
+    --mount type=volume,src=aiwork-home,volume-nocopy,volume-subpath=.codex,dst=/home/node/.codex \
+    --mount type=volume,src=aiwork-home,volume-nocopy,volume-subpath=.local/state/aiwork,dst=/home/node/.local/state/aiwork,readonly \
+    --mount type=volume,src=aiwork-home,volume-nocopy,volume-subpath=.local/state/aiwork-codex,dst=/run/dow-codex \
+    dow-codex:1 >/dev/null
+fi
+dc start aiwork-codex >/dev/null
+for i in {1..60}; do
+  if dc exec aiwork-tools test -S /home/node/.local/state/aiwork-codex/client.sock; then break; fi
+  if [ "$(dc inspect -f '{{.State.Running}}' aiwork-codex)" != true ]; then echo "Codex 服务启动失败" >&2; exit 1; fi
+  sleep .2
+done
+dc exec aiwork-tools test -S /home/node/.local/state/aiwork-codex/client.sock
+# Older installations keep their running tools container during upgrades.
+for entry in dow-codex aiwork-sessions aiwork-grid; do
+  dc cp "../workspace/$entry" "aiwork-tools:/usr/local/bin/$entry"
+done

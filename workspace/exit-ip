@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+if ip=$(curl --fail --silent --show-error --connect-timeout 8 --max-time 15 https://api.ipify.org); then
+    printf '%s\n' "$ip"
+else
+    trace=$(curl --fail --silent --show-error --connect-timeout 8 --max-time 15 https://www.cloudflare.com/cdn-cgi/trace)
+    printf '%s\n' "$trace" | sed -n 's/^ip=//p'
+fi

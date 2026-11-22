@@ -1,0 +1,53 @@
+#!/bin/bash
+set -eu
+dc() { docker --context colima-dow "$@"; }
+if [ "$#" -eq 0 ] && [ -d "$HOME/Applications/Dow.app" ]; then
+  exec /usr/bin/open "$HOME/Applications/Dow.app"
+fi
+container=aiwork-tools
+managed=false
+if [ "$#" -eq 0 ] || [ "${1:-}" = --ready ] || [ "${1:-}" = --terminal ] || [ "${1:-}" = --grid ] || [ "${1:-}" = --browser ]; then
+  managed=true
+  if ! dc info >/dev/null 2>&1; then
+    printf '正在启动隔离工作区…\n'
+    colima start dow --activate=false
+  fi
+  for service in aiwork-gateway aiwork-tools; do
+    if [ "$(dc inspect -f '{{.State.Running}}' "$service")" != true ]; then
+      dc start "$service" >/dev/null
+    fi
+  done
+  if [ "$(dc inspect -f '{{.State.Running}}' aiwork-codex 2>/dev/null || true)" = false ]; then
+    if [ "$(dc inspect -f '{{.HostConfig.NetworkMode}}' aiwork-tools)" = none ]; then
+      dc start aiwork-codex >/dev/null || echo 'Codex 的隔离环境启动失败。' >&2
+    fi
+  fi
+fi
+case "${1:-}" in
+  --list) exec docker --context colima-dow exec "$container" tmux list-sessions ;;
+  --ip) exec docker --context colima-dow exec "$container" exit-ip ;;
+  --help) echo 'aiwork 打开 Dow。--terminal 进入终端目录，--grid 三工具同屏，--browser 打开专用 Chrome，--ip 检查出口。aiwork 项目名 打开项目命令行。'; exit ;;
+esac
+name=${1:-main}
+if "$managed"; then name=main; fi
+case "$name" in -*|*/*|*:*|*.*) echo '项目名不能以 - 开头，也不能包含 / : .' >&2; exit 2 ;; esac
+observed=$(dc exec "$container" exit-ip)
+if [ "$observed" != "$(cat "${DOW_CONFIG_DIR:-$HOME/.config/dow}/expected-ip")" ]; then
+  echo '出口校验失败，已拒绝打开工作区。' >&2
+  exit 1
+fi
+if [ "${1:-}" = --ready ]; then
+  printf '%s\n' "$observed"
+  exit
+fi
+dc exec "$container" mkdir -p "/work/$name"
+if [ "${1:-}" = --browser ]; then
+  exec /usr/bin/python3 -I "$HOME/Library/Application Support/dow-native/open.py"
+fi
+if "$managed"; then
+  mode=init
+  if [ "${1:-}" = --grid ]; then mode=preset; fi
+  dc exec "$container" aiwork-sessions "$mode"
+  exec docker --context colima-dow exec -it -e LANG=C.UTF-8 "$container" tmux -u -L aiwork-views attach-session -t '=Desk'
+fi
+exec docker --context colima-dow exec -it "$container" tmux new-session -A -s "$name" -c "/work/$name"

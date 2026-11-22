@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+# Run as the workspace user. Codex sees this same directory read-only.
+location="$HOME/.local/state/aiwork"
+tool="$location/dow-mac"
+umask 077
+mkdir -p "$location"
+temp=$(mktemp "$location/.dow-mac.XXXXXX")
+trap 'rm -f "$temp"' EXIT
+cat /usr/local/bin/dow-mac > "$temp"
+chmod 700 "$temp"
+mv -f "$temp" "$tool"
+# Only our named server is managed here. Preserve unrelated MCP configurations.
+for app in agy claude codex; do
+    case "$app" in
+        agy) agy mcp add --type stdio dow-mac "$tool" mcp >/dev/null ;;
+        claude)
+            if "$app" mcp get dow-mac 2>/dev/null | grep -Fq "$tool"; then continue; fi
+            "$app" mcp add --scope user --transport stdio dow-mac -- "$tool" mcp >/dev/null ;;
+        codex) /opt/codex/bin/codex mcp add dow-mac -- "$tool" mcp >/dev/null ;;
+    esac
+done

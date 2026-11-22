@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+socket="$HOME/.local/state/aiwork-codex/client.sock"
+if [ ! -S "$socket" ]; then
+    echo 'Codex 的隔离环境尚未就绪。请在 Dow 中点底部的固定出口状态重新连接。' >&2
+    exit 1
+fi
+exec /opt/codex/bin/codex --remote "unix://$socket" -C "$PWD" "$@"

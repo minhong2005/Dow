@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Dow's local macOS command tool, as an MCP stdio server or a CLI."""
+import argparse
+import json
+import os
+from pathlib import Path
+import socket
+import sys
+
+NAME = "mac_exec"
+STATE = Path.home() / ".local/state/aiwork"
+DESCRIPTION = ("Run a noninteractive macOS zsh command on the user's Mac, including access to original Mac files "
+               "and local Mac apps. For local Mac tasks, use this tool instead of the Linux terminal. "
+               "Dow displays the command and directory on the Mac for approval. Use the normal Dow browser "
+               "action for web pages. Networked helper apps can have their own network settings.")
+SCHEMA = {"type":"object","properties":{"command":{"type":"string","description":"Exact macOS zsh command."},
+          "cwd":{"type":"string","description":"Absolute Mac directory, or ~ for the user's home."}},
+          "required":["command"],"additionalProperties":False}
+
+def call(command, cwd):
+    payload = json.dumps({"command":command,"cwd":cwd}, ensure_ascii=True).encode()+b"\n"
+    if len(payload)>32768:
+        raise ValueError("命令过长，请拆成两步。")
+    with socket.socket(socket.AF_UNIX) as s:
+        s.settimeout(285)
+        s.connect(str(STATE/"mac-command.sock"))
+        s.sendall(payload)
+        data=s.makefile("rb").readline(1048576)
+    if not data: raise RuntimeError("Dow 本机命令连接已关闭。")
+    return json.loads(data)
+
+def serve():
+    for line in sys.stdin:
+        request_id = None
+        try:
+            req=json.loads(line)
+            if not isinstance(req,dict) or "id" not in req:continue
+            request_id=req["id"]; method=req.get("method"); params=req.get("params",{})
+            if method=="initialize":
+                v=params.get("protocolVersion")
+                result={"protocolVersion":v if v in ("2025-11-25","2025-06-18","2025-03-26","2024-11-05") else "2025-06-18",
+                        "capabilities":{"tools":{}},"serverInfo":{"name":"dow-mac","version":"1.0"}}
+            elif method=="tools/list":
+                result={"tools":[{"name":NAME,"description":DESCRIPTION,"inputSchema":SCHEMA}]}
+            elif method=="tools/call" and params.get("name")==NAME:
+                try:
+                    args=params["arguments"]; r=call(args["command"],args.get("cwd","~"))
+                    message=r["output"] or ("完成" if r["code"]==0 else "命令返回 "+str(r["code"]))
+                    result={"content":[{"type":"text","text":message}],"isError":r["code"]!=0}
+                except (OSError,ValueError,KeyError,RuntimeError) as e:
+                    result={"content":[{"type":"text","text":"Dow 本机命令未完成："+str(e)}],"isError":True}
+            elif method=="ping":
+                result={}
+            else:
+                print(json.dumps({"jsonrpc":"2.0","id":request_id,"error":{"code":-32601,"message":"Unknown method"}}),flush=True)
+                continue
+            reply={"jsonrpc":"2.0","id":request_id,"result":result}
+        except (ValueError,TypeError,KeyError) as e:
+            reply={"jsonrpc":"2.0","id":request_id,"error":{"code":-32602,"message":str(e)}}
+        print(json.dumps(reply,ensure_ascii=True),flush=True)
+
+if __name__=="__main__":
+    if sys.argv[1:]==["mcp"]: serve()
+    else:
+        parser=argparse.ArgumentParser(description=DESCRIPTION)
+        parser.add_argument("command");parser.add_argument("--cwd",default="~")
+        args=parser.parse_args()
+        try:
+            r=call(args.command,args.cwd);print(r["output"],end="");sys.exit(r["code"])
+        except (OSError,ValueError,RuntimeError) as e: sys.exit("Dow 本机命令未完成："+str(e))

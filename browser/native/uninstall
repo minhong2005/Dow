@@ -1,0 +1,50 @@
+#!/usr/bin/python3
+"""Remove services and PF rules installed by the optional Chrome integration."""
+from pathlib import Path
+import os
+import plistlib
+import subprocess
+
+base = Path(__file__).resolve().parent
+subprocess.run([str(base / "launch-lock"), "unlock"], check=True)
+relay = "org.dow-workbench.chrome-relay"
+daemon = "org.dow-workbench.chrome-firewall"
+state = Path.home() / "Library/Application Support/dow-native"
+agent = Path.home() / "Library/LaunchAgents" / (relay + ".plist")
+domain = "gui/" + str(os.getuid())
+plist = Path("/Library/LaunchDaemons") / (daemon + ".plist")
+if plist.exists():
+    service = plistlib.loads(plist.read_bytes())
+    expected = ["/Library/PrivilegedHelperTools/org.dow-workbench.chrome/firewall",
+                str(os.getuid()), str(Path.home())]
+    if service.get("ProgramArguments") != expected or service.get("Label") != daemon:
+        raise SystemExit("已安装的服务与当前账户不匹配。")
+    command = """
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+if launchctl print system/org.dow-workbench.chrome-firewall >/dev/null 2>&1; then
+    launchctl bootout system/org.dow-workbench.chrome-firewall
+fi
+pfctl -a com.apple/000.dow-chrome -F rules
+state=/var/run/org.dow-workbench.chrome
+if test -s "$state/token"; then
+    token=$(cat "$state/token")
+    case "$token" in ''|*[!0-9]*) exit 1;; esac
+    if pfctl -s References 2>/dev/null | grep -Fq "$token"; then pfctl -X "$token"; fi
+fi
+rm -f "$state/rules" "$state/token"
+rm -f /Library/PrivilegedHelperTools/org.dow-workbench.chrome/firewall
+rm -f /Library/LaunchDaemons/org.dow-workbench.chrome-firewall.plist
+if dscl . -read /Groups/_dowchrome RealName 2>/dev/null | grep -Fq 'Dow Chrome network'; then
+    dseditgroup -o delete _dowchrome
+fi
+"""
+    applescript = """on run argv
+        do shell script (item 1 of argv) with administrator privileges with prompt "移除 Dow 的 Chrome 防火墙服务"
+    end run"""
+    subprocess.run(["/usr/bin/osascript", "-e", applescript, command], check=True)
+if agent.exists():
+    if subprocess.run(["launchctl", "print", domain + "/" + relay], capture_output=True).returncode == 0:
+        subprocess.run(["launchctl", "bootout", domain + "/" + relay], check=True)
+    agent.unlink()
+print("请在系统设置的「设备管理」中移除 Dow 的 Chrome 描述文件，再正常打开 Chrome。")

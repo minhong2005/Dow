@@ -1,0 +1,100 @@
+#!/usr/bin/python3
+"""Gate the installed Chrome bundle by its parent without modifying Google's signed files."""
+import fcntl
+import os
+from pathlib import Path
+import plistlib
+import pwd
+import stat
+import subprocess
+import sys
+
+PUBLIC = Path("/Applications/Google Chrome.app")
+GATE = Path("/Applications/Dow Browser")
+BUNDLE = GATE / PUBLIC.name
+STATE = Path.home() / "Library/Application Support/dow-launch-lock"
+MARK = STATE / "chrome-location"
+ALLOW = "group:_dowchrome allow search"
+DENY = "user:" + pwd.getpwuid(os.getuid()).pw_name + " deny search"
+
+
+def is_alias():
+    return PUBLIC.is_symlink() and os.readlink(PUBLIC) == str(BUNDLE)
+
+
+def acl_rule(add, rule):
+    listing = subprocess.check_output(["/bin/ls", "-led", GATE], text=True)
+    present = any(line.partition(": ")[2] == rule for line in listing.splitlines())
+    if present != add:
+        args = ["+a#", "0"] if add else ["-a"]
+        subprocess.run(["/bin/chmod", *args, rule, GATE], check=True)
+
+
+def own_gate():
+    return (GATE.is_dir() and not GATE.is_symlink() and GATE.stat().st_uid == os.getuid()
+            and MARK.is_file() and MARK.read_text() == str(BUNDLE))
+
+
+def restore():
+    if not own_gate():
+        raise RuntimeError("无法确认目录归属，未还原。")
+    if os.path.lexists(PUBLIC) and not is_alias():
+        if PUBLIC.is_symlink() or not PUBLIC.is_dir() or BUNDLE.name in os.listdir(GATE):
+            raise RuntimeError("原 Chrome 路径已由其他文件占用，受保护的目录已保留。")
+    acl_rule(False, DENY)
+    acl_rule(False, ALLOW)
+    if is_alias():
+        os.lchflags(PUBLIC, PUBLIC.lstat().st_flags & ~stat.UF_IMMUTABLE)
+        PUBLIC.unlink()
+    if BUNDLE.exists():
+        if os.path.lexists(PUBLIC):
+            raise RuntimeError("原位置出现另一份 Chrome，请先处理两份应用。")
+        BUNDLE.rename(PUBLIC)
+    if not (PUBLIC / "Contents/Info.plist").is_file():
+        raise RuntimeError("未能找到原来的 Chrome")
+    GATE.rmdir()
+    MARK.unlink()
+
+
+def lock():
+    if is_alias() and own_gate() and not os.access(BUNDLE / "Contents/Info.plist", os.R_OK):
+        print("Chrome 外部启动锁已启用。")
+        return
+    if os.path.lexists(GATE) or MARK.exists() or PUBLIC.is_symlink():
+        raise RuntimeError("已有其他目录或未完成的操作，请先检查。")
+    if plistlib.loads((PUBLIC / "Contents/Info.plist").read_bytes())["CFBundleIdentifier"] != "com.google.Chrome":
+        raise RuntimeError("未找到指定的 Google Chrome。")
+    subprocess.run(["/usr/bin/codesign", "--verify", PUBLIC], check=True)
+    GATE.mkdir(mode=0o755)
+    try:
+        MARK.write_text(str(BUNDLE))
+        PUBLIC.rename(BUNDLE)
+        PUBLIC.symlink_to(BUNDLE, target_is_directory=True)
+        os.lchflags(PUBLIC, PUBLIC.lstat().st_flags | stat.UF_IMMUTABLE)
+        acl_rule(True, DENY)
+        acl_rule(True, ALLOW)
+        try:
+            os.stat(PUBLIC / "Contents/MacOS/Google Chrome")
+        except PermissionError:
+            print("当前普通账户已无法通过应用目录启动 Chrome。")
+        else:
+            raise RuntimeError("外部账户仍可进入浏览器目录。")
+    except BaseException:
+        if MARK.exists():
+            restore()
+        else:
+            GATE.rmdir()
+        raise
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] not in (["lock"], ["unlock"]):
+        sys.exit("用法：launch-lock lock | unlock（请先正常退出 Chrome）")
+    STATE.mkdir(exist_ok=True, mode=0o700)
+    with (STATE / "chrome.lock").open("a") as mutex:
+        fcntl.flock(mutex, fcntl.LOCK_EX)
+        if sys.argv[1] == "lock":
+            lock()
+        elif MARK.exists():
+            restore()
+            print("原 Chrome 应用位置已恢复。")

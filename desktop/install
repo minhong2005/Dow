@@ -1,0 +1,45 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")"
+build_only=false
+appdir="$HOME/Applications"
+if [ "$#" -gt 0 ]; then
+    if [ "$#" -ne 2 ] || [ "$1" != "--build-only" ]; then echo "usage: install [--build-only DIRECTORY]" >&2; exit 2; fi
+    build_only=true
+    appdir=$2
+fi
+app="$appdir/Dow.app"
+mkdir -p "$appdir"
+build=$(mktemp -d "$appdir/.aiwork-build.XXXXXX")
+trap 'rm -rf "$build"' EXIT
+stage="$build/Dow.app"
+res="$stage/Contents/Resources"
+mkdir -p "$stage/Contents/MacOS" "$res/vendor"
+if [ ! -f node_modules/@xterm/addon-fit/lib/addon-fit.js ]; then npm ci --ignore-scripts --no-audit --no-fund; fi
+/usr/bin/swiftc -O -framework AppKit -framework WebKit App.swift -o "$stage/Contents/MacOS/Dow"
+cp ../aiwork "$res/"
+cp index.html style.css app.js backend.py browser-exit-page.py mac-commands.py mac-command-socket.py mac-command.sb "$res/"
+for lib in xterm addon-fit addon-web-links; do
+    cp "node_modules/@xterm/$lib/lib/$lib.js" "$res/vendor/"
+    cp "node_modules/@xterm/$lib/LICENSE" "$res/vendor/$lib-LICENSE"
+done
+cp node_modules/@xterm/xterm/css/xterm.css "$res/vendor/"
+/usr/bin/swift Icons.swift "$res" "$build/Workbench.iconset"
+
+/usr/bin/iconutil -c icns "$build/Workbench.iconset" -o "$res/Workbench.icns"
+/usr/bin/python3 - "$stage/Contents/Info.plist" <<'PY'
+import plistlib,sys
+with open(sys.argv[1],"wb") as f:
+ plistlib.dump(dict(CFBundleName="Dow",CFBundleDisplayName="Dow",CFBundleIdentifier="org.dow-workbench.desktop",CFBundleExecutable="Dow",CFBundlePackageType="APPL",CFBundleVersion="1",CFBundleShortVersionString="1.0",CFBundleIconFile="Workbench",LSMinimumSystemVersion="13.0",NSHighResolutionCapable=True,NSAppleEventsUsageDescription="在你允许本机命令时，Dow 可以操作命令指定的 Mac 应用。"),f)
+PY
+/usr/bin/codesign --force --sign - "$stage" >/dev/null
+/usr/bin/codesign --verify "$stage"
+if [ -d "$app" ]; then
+    test "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$app/Contents/Info.plist")" = org.dow-workbench.desktop
+    mv "$app" "$build/previous.app"
+fi
+mv "$stage" "$app"
+if "$build_only"; then exit 0; fi
+entry="$HOME/Desktop/Dow.app"
+if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then ln -s "$app" "$entry"; fi
+/usr/bin/open "$app"

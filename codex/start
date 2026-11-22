@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+umask 077
+# The app server's published pathname can point to a private, short /tmp path.
+# Forward its local transport so the TUI never needs the server's /tmp mount.
+socat UNIX-LISTEN:/run/dow-codex/client.sock,unlink-early,fork,mode=0600 UNIX-CONNECT:/tmp/dow-codex-server.sock &
+exec /opt/codex/bin/codex app-server --listen unix:///tmp/dow-codex-server.sock

@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Attach one GUI view to an existing session. Its lifetime is independent of the task."""
+import errno
+import fcntl
+import json
+import os
+import pty
+import re
+import select
+import signal
+import struct
+import sys
+import termios
+
+job, cols, rows = sys.argv[1:]
+if not re.fullmatch(r"job-[0-9a-f]{12}",job):
+    sys.exit("未知会话")
+
+def size(fd, cols, rows):
+    value = struct.pack("HHHH", max(2,min(500,int(rows))),max(2,min(1000,int(cols))),0,0)
+    fcntl.ioctl(fd,termios.TIOCSWINSZ,value)
+
+pid, master = pty.fork()
+if pid==0:
+    size(0,cols,rows)
+    for name in ("TMUX","TMUX_PANE"): os.environ.pop(name,None)
+    os.environ.update(TERM="xterm-256color",LANG="C.UTF-8",LC_ALL="C.UTF-8")
+    os.execlp("tmux","tmux","-u","-L","default","attach-session","-t","="+job)
+
+pending=b""
+try:
+    while True:
+        ready,_,_ = select.select([0,master],[],[])
+        if 0 in ready:
+            part=os.read(0,65536)
+            if not part:break
+            pending+=part
+            if len(pending)>4_000_000:break
+            lines=pending.split(b"\n");pending=lines.pop()
+            for line in lines:
+                msg=json.loads(line)
+                if msg["op"]=="resize":size(master,msg["cols"],msg["rows"])
+                elif msg["op"]=="input":
+                    data=memoryview(msg["data"].encode())
+                    while data:data=data[os.write(master,data):]
+                elif msg["op"]=="detach":sys.exit(0)
+        if master in ready:
+            try: chunk=os.read(master,32768)
+            except OSError as e:
+                if e.errno==errno.EIO:break
+                raise
+            if not chunk:break
+            sys.stdout.buffer.write(chunk);sys.stdout.buffer.flush()
+finally:
+    os.close(master)
+    try:os.kill(pid,signal.SIGHUP)
+    except ProcessLookupError:pass
+    os.waitpid(pid,0)

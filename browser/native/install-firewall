@@ -1,0 +1,50 @@
+#!/usr/bin/python3
+import base64
+import os
+from pathlib import Path
+import plistlib
+import shlex
+import subprocess
+
+base = "/Library/PrivilegedHelperTools/org.dow-workbench.chrome"
+label = "org.dow-workbench.chrome-firewall"
+plist = "/Library/LaunchDaemons/" + label + ".plist"
+config = plistlib.dumps(dict(Label=label, ProgramArguments=[base+"/firewall", str(os.getuid()), str(Path.home())],
+                             RunAtLoad=True, KeepAlive=True, ThrottleInterval=10,
+                             StandardErrorPath="/var/log/org.dow-workbench.chrome-firewall.log"))
+def encoded(data):
+    return shlex.quote(base64.b64encode(data).decode("ascii"))
+guard = Path(__file__).with_name("firewall").read_bytes()
+command = f"""set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+umask 077
+dir={shlex.quote(base)}
+mkdir -p "$dir"
+test ! -L "$dir" && test "$(stat -f %u "$dir")" = 0
+chmod 755 "$dir"
+if dscl . -read /Groups/_dowchrome >/dev/null 2>&1; then
+    dscl . -read /Groups/_dowchrome RealName | grep -Fq 'Dow Chrome network'
+else
+    dseditgroup -o create -r 'Dow Chrome network' _dowchrome
+fi
+printf '%s' {encoded(guard)} | base64 -D > "$dir/firewall.new"
+chmod 755 "$dir/firewall.new"
+mv -f "$dir/firewall.new" "$dir/firewall"
+printf '%s' {encoded(config)} | base64 -D > "$dir/service.new"
+plutil -lint "$dir/service.new" >/dev/null
+install -o root -g wheel -m 644 "$dir/service.new" {shlex.quote(plist)}
+rm -f "$dir/service.new"
+if launchctl print system/{label} >/dev/null 2>&1; then
+    launchctl kickstart -k system/{label}
+else
+    for attempt in 1 2 3 4 5; do
+        if launchctl bootstrap system {shlex.quote(plist)}; then exit 0; fi
+        sleep 2
+    done
+    exit 1
+fi
+"""
+applescript = '''on run argv
+    do shell script (item 1 of argv) with administrator privileges with prompt "为 AI 工作台的独立 Chrome 启用专用防火墙规则"
+end run'''
+subprocess.run(["/usr/bin/osascript", "-e", applescript, command], check=True)

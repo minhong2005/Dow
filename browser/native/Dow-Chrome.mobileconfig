@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>
+	<key>PayloadIdentifier</key>
+	<string>org.dow-workbench.chrome.policy</string>
+	<key>PayloadUUID</key>
+	<string>B5519C58-93CA-58E4-AA0E-29746FB7DEFE</string>
+	<key>PayloadScope</key>
+	<string>User</string>
+	<key>PayloadDisplayName</key>
+	<string>Dow · Google Chrome 固定出口</string>
+	<key>PayloadDescription</key>
+	<string>仅为此用户的 Google Chrome 指定 Dow 本机代理，限制未代理的 WebRTC UDP、QUIC 和网络预测。代理不可用时网页将无法联网。可在系统设置的设备管理中移除此配置。</string>
+	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>PayloadType</key>
+			<string>com.apple.ManagedClient.preferences</string>
+			<key>PayloadIdentifier</key>
+			<string>org.dow-workbench.chrome.settings</string>
+			<key>PayloadUUID</key>
+			<string>73AEB854-B156-556D-96A6-D2A85DD2AF75</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>PayloadDisplayName</key>
+			<string>Google Chrome 网络设置</string>
+			<key>PayloadContent</key>
+			<dict>
+				<key>com.google.Chrome</key>
+				<dict>
+					<key>Forced</key>
+					<array>
+						<dict>
+							<key>mcx_preference_settings</key>
+							<dict>
+								<key>ProxySettings</key>
+								<dict>
+									<key>ProxyMode</key>
+									<string>fixed_servers</string>
+									<key>ProxyServer</key>
+									<string>http://127.0.0.1:39175</string>
+									<key>ProxyBypassList</key>
+									<string>&lt;-loopback&gt;</string>
+								</dict>
+								<key>WebRtcIPHandling</key>
+								<string>disable_non_proxied_udp</string>
+								<key>QuicAllowed</key>
+								<false/>
+								<key>NetworkPredictionOptions</key>
+								<integer>2</integer>
+							</dict>
+						</dict>
+					</array>
+				</dict>
+			</dict>
+		</dict>
+	</array>
+</dict>
+</plist>
