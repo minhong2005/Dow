@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import socket
 import socketserver
+import stat
 import subprocess
 import time
 from urllib.parse import urlsplit
@@ -35,7 +36,21 @@ def guard_ok():
             raise RuntimeError("防火墙未拦住测试连接，已拒绝打开 Chrome")
 
 
-def shared_pid():
+def isolated_profile():
+    try:
+        mode = (STATE / "profile-mode").read_text().strip()
+    except FileNotFoundError:
+        mode = "shared"
+    if mode not in ("shared", "isolated"):
+        raise RuntimeError("Chrome 档案模式无效")
+    return mode == "isolated"
+
+
+PROFILE = STATE / "Dow Chrome"
+PROFILE_ARG = "--user-data-dir=" + str(PROFILE)
+
+
+def browser_pid():
     # Refuse to forward to an existing regular instance, including a Dock launch
     # that won the race for the default profile. An open-URL event targets one PID.
     table = subprocess.check_output(["/bin/ps","-axo","pid=,uid=,gid=,rgid=,comm="],text=True)
@@ -46,12 +61,20 @@ def shared_pid():
         if len(fields)!=5 or int(fields[1])!=os.getuid():continue
         if fields[4] not in executables:continue
         pid, _, group, real_group, _ = fields
-        if int(group)!=os.getegid() or int(real_group)!=os.getgid():
-            raise RuntimeError("当前 Chrome 是从普通入口启动的。请用 ⌘Q 退出 Chrome，再从 Dow 打开，以启用固定出口。")
         args = subprocess.run(["/bin/ps","-ww","-p",pid,"-o","args="],text=True,capture_output=True)
         if args.returncode:continue
-        if PROXY not in args.stdout.split() or "--user-data-dir=" in args.stdout or "--remote-debugging" in args.stdout:
-            raise RuntimeError("另一个 Chrome 档案正在使用工作台网络，请先正常退出该实例。")
+        command = " " + args.stdout.strip() + " "
+        if isolated_profile():
+            if " " + PROFILE_ARG + " " not in command:
+                continue
+            if command.count("--user-data-dir=") != 1:
+                raise RuntimeError("Chrome 档案参数不一致")
+        elif "--user-data-dir=" in command:
+            continue
+        if int(group)!=os.getegid() or int(real_group)!=os.getgid():
+            raise RuntimeError("所选 Chrome 档案已在普通入口打开，请先完全退出该实例。")
+        if any(" " + flag + " " not in command for flag in NET_FLAGS) or "--remote-debugging" in command:
+            raise RuntimeError("Chrome 网络参数未通过核验")
         matches.append(int(pid))
     if len(matches)>1:
         raise RuntimeError("等待 Chrome 完成启动后再重试。")
@@ -66,25 +89,30 @@ class Chrome:
         guard_ok()
         if self.process is not None and self.process.poll() is not None:
             self.process = None
-        pid = shared_pid()
+        pid = browser_pid()
         if pid:
             return pid
         restore = STATE/"restore-once"
         args = [CHROME,*NET_FLAGS]
-        if restore.exists():args.append("--restore-last-session")
-        # No custom user-data-dir or profile selector: Chrome uses its real
-        # profile and its own normal macOS Keychain access and sync settings.
+        if isolated_profile():
+            PROFILE.mkdir(mode=0o700,exist_ok=True)
+            info = PROFILE.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise RuntimeError("Dow 专用 Chrome 资料目录权限无效")
+            args.extend([PROFILE_ARG, "--disable-sync", "--no-first-run", "--no-default-browser-check"])
+        elif restore.exists():
+            args.append("--restore-last-session")
         self.process = subprocess.Popen(args,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         for _ in range(80):
             if self.process.poll() is not None:break
-            pid = shared_pid()
+            pid = browser_pid()
             if pid==self.process.pid:
                 probe = subprocess.run([WINDOW,"ready",str(pid)],capture_output=True)
                 if probe.returncode==0:
-                    restore.unlink(missing_ok=True)
+                    if not isolated_profile():restore.unlink(missing_ok=True)
                     return pid
             time.sleep(.15)
-        raise RuntimeError("共享 Chrome 尚未完成启动，请稍后重试。")
+        raise RuntimeError("Chrome 尚未完成启动，请稍后重试。")
 
     def open(self,url):
         if url is not None:
@@ -110,10 +138,10 @@ class Driver(socketserver.StreamRequestHandler):
                 out=chrome.open(req["url"] if action=="open" else None)
             elif action=="guard":
                 guard_ok()
-                out={"ok":True,"uid":os.getuid(),"gid":os.getegid(),"pid":shared_pid()}
+                out={"ok":True,"uid":os.getuid(),"gid":os.getegid(),"pid":browser_pid()}
             else:raise ValueError()
         except (RuntimeError, ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
-            out={"ok":False,"error":str(error) if isinstance(error,RuntimeError) else "共享 Chrome 或网络保护尚未就绪"}
+            out={"ok":False,"error":str(error) if isinstance(error,RuntimeError) else "Chrome 或网络保护尚未就绪"}
         with contextlib.suppress(OSError):self.wfile.write(json.dumps(out).encode()+b"\n")
 
 if __name__=="__main__":

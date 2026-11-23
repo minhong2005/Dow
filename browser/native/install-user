@@ -1,10 +1,14 @@
 #!/usr/bin/python3
+import argparse
 import os
 from pathlib import Path
 import plistlib
 import shutil
 import subprocess
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--profile", choices=("shared", "isolated"), help="Chrome profile used by Dow")
+profile = parser.parse_args().profile
 os.umask(0o077)
 base = Path(__file__).resolve().parent
 state = Path.home()/"Library/Application Support/dow-native"
@@ -18,6 +22,10 @@ for name in ("driver.py","relay.py","open.py"):
     os.replace(tmp,state/name)
 docker = ["/opt/homebrew/bin/docker","--context","colima-dow"]
 subprocess.run([*docker,"cp",str(base.parent.parent/"workspace/aiwork-native-requests"),"aiwork-tools:/usr/local/bin/aiwork-native-requests"],check=True)
+if profile:
+    tmp = state / "profile-mode.new"
+    tmp.write_text(profile + "\n")
+    os.replace(tmp, state / "profile-mode")
 name = "org.dow-workbench.chrome-relay"
 plist = Path.home()/"Library/LaunchAgents"/(name+".plist")
 plist.parent.mkdir(parents=True,exist_ok=True)

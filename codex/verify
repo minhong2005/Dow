@@ -13,4 +13,17 @@ dc exec -w /work/main aiwork-codex codex sandbox -c 'sandbox_mode="read-only"' -
   /bin/sh -ec 'ls -A >/dev/null; test ! -w .; pwd'
 dc exec -w /work/main aiwork-codex codex sandbox -c 'sandbox_mode="workspace-write"' -- \
   /bin/sh -ec 'test -w .; test ! -w "$HOME"'
-echo 'Codex 终端、项目读写权限和固定出口检查通过。'
+dc exec -w /work/main aiwork-codex codex sandbox -c 'sandbox_mode="workspace-write"' -- \
+  /bin/sh -ec '
+    export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
+    git -c credential.helper= ls-remote --exit-code https://github.com/minhong2005/Dow.git HEAD >/dev/null
+    headers=$(curl -qsS --proxy "$HTTPS_PROXY" --noproxy "" --max-time 5 -D - -o /dev/null http://dow-verify.invalid/)
+    if ! printf "%s\n" "$headers" | grep -iq "^x-proxy-error: blocked-by-allowlist"; then
+      echo "未检测到 Codex 沙箱的域名限制。" >&2
+      exit 1
+    fi
+    if curl -qfsS --noproxy "*" --connect-timeout 2 --max-time 3 https://1.1.1.1 -o /dev/null 2>/dev/null; then
+      echo "Codex 沙箱发现直连出口。" >&2
+      exit 1
+    fi'
+echo 'Codex 终端、项目权限、固定出口和 GitHub 匿名读取检查通过。'

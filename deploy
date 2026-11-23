@@ -5,6 +5,7 @@ dc() { docker --context colima-dow "$@"; }
 revision=$(./configure revision)
 upstream=$(./configure first-ip "$revision")
 port=$(./configure first-port "$revision")
+expected=$(./configure expected "$revision")
 projects=${DOW_PROJECTS:-"$HOME/DowProjects"}
 mkdir -p "$projects"
 projects=$(cd "$projects" && pwd -P)
@@ -13,8 +14,9 @@ if ! dc info >/dev/null 2>&1; then
 fi
 if dc inspect aiwork-gateway >/dev/null 2>&1; then
   active=$(dc inspect -f '{{index .Config.Labels "org.dow.config"}}' aiwork-gateway)
-  if [ "$active" != "$revision" ]; then
-    echo '配置已更改。请按 README「更换代理」步骤重建网关。' >&2
+  guard=$(dc inspect -f '{{index .Config.Labels "org.dow.gateway-guard"}}' aiwork-gateway)
+  if [ "$guard" != 1 ] || [ "$active" != "$revision" ]; then
+    echo '现有网关需要更新。请按 README「升级网关与更换代理」重建网关。' >&2
     exit 1
   fi
 fi
@@ -29,7 +31,7 @@ python3 assets.py
 buildctx=$(mktemp -d)
 trap 'rm -rf "$buildctx"' EXIT
 mkdir "$buildctx/gateway"
-cp gateway/{Dockerfile,start.sh} "$buildctx/gateway/"
+cp gateway/{Dockerfile,start.sh,guard.py} "$buildctx/gateway/"
 ln "${DOW_CACHE_DIR:-$HOME/Library/Caches/Dow}/singbox.tgz" "$buildctx/gateway/" || cp "${DOW_CACHE_DIR:-$HOME/Library/Caches/Dow}/singbox.tgz" "$buildctx/gateway/"
 dc build -t aiwork-gateway:1 "$buildctx/gateway"
 mkdir "$buildctx/tools"
@@ -41,7 +43,7 @@ dc build --build-arg DEV_UID="$(id -u)" -t aiwork-tools:1 "$buildctx/tools"
 if ! dc container inspect aiwork-gateway >/dev/null 2>&1; then
   dc create --name aiwork-gateway --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID \
     --security-opt no-new-privileges --sysctl net.ipv6.conf.all.disable_ipv6=1 \
-    --label "org.dow.config=$revision" -e UPSTREAM_IP="$upstream" -e UPSTREAM_PORT="$port" -v aiwork-link:/link aiwork-gateway:1 >/dev/null
+    --label org.dow.gateway-guard=1 -e DOW_EXPECTED_IP="$expected" --label "org.dow.config=$revision" -e UPSTREAM_IP="$upstream" -e UPSTREAM_PORT="$port" -v aiwork-link:/link aiwork-gateway:1 >/dev/null
 fi
 # Write the credential only into the gateway, without a host temp file or shell argument.
 if [ "$(dc inspect -f '{{.State.Running}}' aiwork-gateway)" = false ]; then
@@ -56,11 +58,11 @@ with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as archive:
 ' | dc cp -a - aiwork-gateway:/config
   dc start aiwork-gateway >/dev/null
 fi
-for attempt in {1..30}; do
-  if dc exec aiwork-gateway sh -c 'test -S /link/out.sock && socat -u /dev/null TCP4:127.0.0.1:7890,connect-timeout=1' >/dev/null 2>&1; then
+for attempt in {1..60}; do
+  if dc exec aiwork-gateway socat -T1 - UNIX-CONNECT:/link/status.sock </dev/null 2>/dev/null | grep -q '"state": "verified"'; then
     break
   fi
-  if [ "$attempt" -eq 30 ]; then echo '网关未能启动，请查看专用网关日志。' >&2; exit 1; fi
+  if [ "$attempt" -eq 60 ]; then echo '网关未能确认固定出口，请查看专用网关日志。' >&2; exit 1; fi
   sleep 0.3
 done
 ./configure activate "$revision"
@@ -71,6 +73,6 @@ if ! dc container inspect aiwork-tools >/dev/null 2>&1; then
 fi
 dc start aiwork-tools >/dev/null
 dc exec aiwork-tools mkdir -p /work/main
-./codex/install
 for entry in dow-mac install-mac-tool; do dc cp "workspace/$entry" "aiwork-tools:/usr/local/bin/$entry"; done
 dc exec aiwork-tools install-mac-tool
+./codex/install

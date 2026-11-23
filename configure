@@ -66,6 +66,8 @@ def main(args):
         print(first["server"])
     elif args == ["first-port"]:
         print(first["server_port"])
+    elif args == ["expected"]:
+        print(expected)
     elif args == ["revision"]:
         print(revision)
     elif args == ["activate"]:

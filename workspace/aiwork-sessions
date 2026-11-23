@@ -110,7 +110,7 @@ def create(tool, project, title, old_pane=None):
                               f"env -u TMUX tmux -L {shlex.quote(BACK)} attach -t ={job}")
     placeholder = tm(BACK, "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", job,
                      "-x", "140", "-y", "38", "-c", str(folder), cmd)
-    for key, value in (("status", "off"), ("@project", project), ("@task", display_title(tool, title)), ("@tool", tool)):
+    for key, value in (("status", "off"), ("mouse", "on"), ("@project", project), ("@task", display_title(tool, title)), ("@tool", tool)):
         tm(BACK, "set-option", "-t", job, key, value)
     tm(BACK, "set-window-option", "-t", job, "remain-on-exit", "on")
     if old_pane:

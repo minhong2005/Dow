@@ -10,7 +10,7 @@ import sys
 NAME = "mac_exec"
 STATE = Path.home() / ".local/state/aiwork"
 DESCRIPTION = ("Run a noninteractive macOS zsh command on the user's Mac, including access to original Mac files "
-               "and local Mac apps. For local Mac tasks, use this tool instead of the Linux terminal. "
+               "on the Mac Desktop or outside the Linux workspace, and local Mac apps. "
                "Dow displays the command and directory on the Mac for approval. Use the normal Dow browser "
                "action for web pages. Networked helper apps can have their own network settings.")
 SCHEMA = {"type":"object","properties":{"command":{"type":"string","description":"Exact macOS zsh command."},
@@ -39,7 +39,10 @@ def serve():
             if method=="initialize":
                 v=params.get("protocolVersion")
                 result={"protocolVersion":v if v in ("2025-11-25","2025-06-18","2025-03-26","2024-11-05") else "2025-06-18",
-                        "capabilities":{"tools":{}},"serverInfo":{"name":"dow-mac","version":"1.0"}}
+                        "capabilities":{"tools":{}},"serverInfo":{"name":"dow-mac","version":"1.1"},
+                        "instructions":"For Mac files or apps outside the workspace, call the mac_exec MCP tool. "
+                                       "If tools are deferred, search for mac_exec. Running dow-mac from a "
+                                       "sandboxed Linux shell can be blocked before Dow can prompt for approval."}
             elif method=="tools/list":
                 result={"tools":[{"name":NAME,"description":DESCRIPTION,"inputSchema":SCHEMA}]}
             elif method=="tools/call" and params.get("name")==NAME:
@@ -67,4 +70,6 @@ if __name__=="__main__":
         args=parser.parse_args()
         try:
             r=call(args.command,args.cwd);print(r["output"],end="");sys.exit(r["code"])
+        except PermissionError as e:
+            sys.exit(f"Dow 本机命令连接被拒绝（{e}）。在 Codex 中请调用 dow-mac 的 mac_exec 工具。")
         except (OSError,ValueError,RuntimeError) as e: sys.exit("Dow 本机命令未完成："+str(e))

@@ -46,12 +46,14 @@ if ! dc inspect aiwork-codex >/dev/null 2>&1; then
 fi
 dc start aiwork-codex >/dev/null
 for i in {1..60}; do
-  if dc exec aiwork-tools test -S /home/node/.local/state/aiwork-codex/client.sock; then break; fi
+  if dc exec aiwork-tools test -S /home/node/.local/state/aiwork-codex/client.sock &&
+     dc exec aiwork-codex test -S /tmp/dow-codex-server.sock; then break; fi
   if [ "$(dc inspect -f '{{.State.Running}}' aiwork-codex)" != true ]; then echo "Codex 服务启动失败" >&2; exit 1; fi
   sleep .2
 done
 dc exec aiwork-tools test -S /home/node/.local/state/aiwork-codex/client.sock
 # Older installations keep their running tools container during upgrades.
-for entry in dow-codex aiwork-sessions aiwork-grid; do
+for entry in dow-codex aiwork-sessions aiwork-gui-pty aiwork-grid; do
   dc cp "../workspace/$entry" "aiwork-tools:/usr/local/bin/$entry"
 done
+python3 ./configure-session colima-dow

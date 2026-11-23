@@ -31,6 +31,12 @@ esac
 name=${1:-main}
 if "$managed"; then name=main; fi
 case "$name" in -*|*/*|*:*|*.*) echo '项目名不能以 - 开头，也不能包含 / : .' >&2; exit 2 ;; esac
+if "$managed"; then
+  for attempt in {1..20}; do
+    if dc exec "$container" socat -T1 - UNIX-CONNECT:/link/status.sock </dev/null 2>/dev/null | grep -q '"state": "verified"'; then break; fi
+    sleep 1
+  done
+fi
 observed=$(dc exec "$container" exit-ip)
 if [ "$observed" != "$(cat "${DOW_CONFIG_DIR:-$HOME/.config/dow}/expected-ip")" ]; then
   echo '出口校验失败，已拒绝打开工作区。' >&2

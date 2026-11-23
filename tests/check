@@ -42,6 +42,7 @@ with tempfile.TemporaryDirectory() as tmp:
         config.write_text(json.dumps(fixture))
         assert read("first-ip") == (hop or fixture["socks"])["server"]
         assert read("first-port") == str((hop or fixture["socks"])["server_port"])
+        assert read("expected", fixture["revision"]) == fixture["expected"]
         gateway = json.loads(read("gateway"))
         assert gateway["route"]["final"] == "fixed"
         assert gateway["outbounds"][0]["type"] == "socks"
@@ -54,4 +55,5 @@ with tempfile.TemporaryDirectory() as tmp:
     fixture["socks"]["server"] = "invalid"
     config.write_text(json.dumps(fixture))
     assert subprocess.run(["./configure", "gateway"], env=env, capture_output=True).returncode != 0
+subprocess.run([os.sys.executable, "-I", str(root / "tests/gateway.py")], check=True)
 print("Source, proxy generation and configuration checks passed.")

@@ -99,27 +99,82 @@ function browse(url){
   if(url&&!/^https?:\/\//i.test(url)){notify('工作台 Chrome 只支持网页链接。');return}
   request('browser',url?{url}:{}).catch(e=>notify(e.message));
 }
+// Mouse-aware programs keep ordinary clicks and wheel events. Give an unmodified
+// drag to xterm's local selection, which understands wrapped lines and wide cells.
+function bindTerminalSelection(box, terminal) {
+  let gesture;
+  function cancel() { gesture?.abort(); gesture = undefined; }
+  box.addEventListener('mousedown', down => {
+    if (!down.isTrusted || down.button !== 0 || down.altKey || down.ctrlKey || down.metaKey || down.shiftKey ||
+        terminal.modes.mouseTrackingMode === 'none' || !down.target.closest('.xterm-screen')) return;
+    cancel();
+    down.preventDefault();
+    down.stopPropagation();
+    terminal.focus();
+    terminal.clearSelection();
+    gesture = new AbortController();
+    const options = {capture:true, signal:gesture.signal};
+    // Single clicks belong to the running tool. Text gestures belong to xterm.
+    let selecting = down.detail >= 2;
+    function press(localSelection) {
+      terminal.element.dispatchEvent(new MouseEvent('mousedown', {
+        view:window, bubbles:true, cancelable:true, button:0, buttons:1,
+        detail:down.detail, clientX:down.clientX, clientY:down.clientY, altKey:localSelection
+      }));
+    }
+    if (selecting) press(true);
+    window.addEventListener('mousemove', move => {
+      if (!move.isTrusted) return;
+      if (!selecting) {
+        if (Math.hypot(move.clientX-down.clientX, move.clientY-down.clientY) < 3) return;
+        selecting = true;
+        press(true);
+      }
+      // xterm tracks selection on document. Its terminal-level hover reporter
+      // would also send the same move to the tool and clear the local selection.
+      move.stopPropagation();
+      document.dispatchEvent(new MouseEvent('mousemove', {
+        view:window, bubbles:true, clientX:move.clientX, clientY:move.clientY, buttons:1
+      }));
+    }, options);
+    window.addEventListener('mouseup', up => {
+      if (up.button !== 0) return;
+      if (!selecting) press(false);
+      cancel();
+    }, options);
+    window.addEventListener('blur', cancel, {signal:gesture.signal});
+  }, true);
+  box.addEventListener('mousemove', move => {
+    if (!gesture && !move.buttons && terminal.hasSelection() && terminal.modes.mouseTrackingMode === 'any') {
+      move.stopPropagation();
+    }
+  }, true);
+  return cancel;
+}
+window.selectedTerminalText = () => {
+  for (const {terminal} of panes.values()) {
+    if (terminal.element.contains(document.activeElement)) return terminal.getSelection();
+  }
+  return null;
+};
 function mount(j){
   const view='view'+(++sequence),section=document.createElement('article');
   section.className='pane';section.dataset.job=j.id;section.setAttribute('aria-label',j.title);
   const top=document.createElement('div');top.className='pane-head';top.innerHTML=paneHead(j);
   const box=document.createElement('div');box.className='terminal-box';
   section.append(top,box);$('#desk').append(section);
-  const terminal=new Terminal({cursorBlink:true,fontFamily:'Menlo, Monaco, "PingFang SC", monospace',fontSize:13,lineHeight:1.18,scrollback:5000,
+  const openLink=(_event,url)=>{if(!terminal.hasSelection())browse(url)};
+  const terminal=new Terminal({cursorBlink:true,macOptionClickForcesSelection:true,fontFamily:'Menlo, Monaco, "PingFang SC", monospace',fontSize:13,lineHeight:1.18,scrollback:5000,
     theme:{background:'#181818',foreground:'#f0f0f0',cursor:'#e4e4e4',selectionBackground:'#42464c',black:'#252525',red:'#e58383',green:'#72bc91',yellow:'#d4b179',blue:'#81a1c1',magenta:'#ba9fc3',cyan:'#8bb8ba',white:'#f0f0f0'},
-    linkHandler:{activate:(_event,url)=>browse(url)}});
+    linkHandler:{activate:openLink}});
   const fit=new FitAddon.FitAddon();terminal.loadAddon(fit);
-  terminal.loadAddon(new WebLinksAddon.WebLinksAddon((_event,url)=>browse(url)));
+  terminal.loadAddon(new WebLinksAddon.WebLinksAddon(openLink));
   terminal.open(box);
   const p={j:j.id,view,section,top,terminal,fit,attached:false,frame:0};
+  p.cancelSelectionGesture=bindTerminalSelection(box,terminal);
   panes.set(j.id,p);
   terminal.onData(data=>{if(p.attached)post({op:'input',view,data})});
-  terminal.attachCustomKeyEventHandler(event=>{
-    if(event.type==='keydown'&&event.metaKey&&event.key.toLowerCase()==='c'&&terminal.hasSelection()){
-      post({op:'copy',text:terminal.getSelection()});event.preventDefault();return false;
-    }
-    return !event.metaKey;
-  });
+  terminal.attachCustomKeyEventHandler(event=>!event.metaKey);
   function measure(){
     if(!section.isConnected)return;
     const dims=fit.proposeDimensions();
@@ -138,7 +193,7 @@ function mount(j){
 }
 function unmount(id){
   const p=panes.get(id);if(!p)return;
-  p.observer.disconnect();cancelAnimationFrame(p.frame);
+  p.cancelSelectionGesture();p.observer.disconnect();cancelAnimationFrame(p.frame);
   if(p.attached)post({op:'detach',view:p.view});
   panes.delete(id);p.terminal.dispose();p.section.remove();
 }

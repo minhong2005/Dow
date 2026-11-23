@@ -14,7 +14,7 @@ iptables-restore <<RULES
 COMMIT
 RULES
 test "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6)" = 1
-# Workspace sees only the socket, mounted read-only. It has no external NIC.
-rm -f /link/out.sock
-socat UNIX-LISTEN:/link/out.sock,mode=0666,fork TCP4:127.0.0.1:7890 &
+# Workspace sees only the checked socket, mounted read-only. It has no external NIC.
+rm -f /link/out.sock /link/status.sock
+python3 -I /usr/local/bin/gateway-guard.py &
 exec setpriv --reuid=65532 --regid=65532 --clear-groups --no-new-privs sing-box run -c /config/proxy.json

@@ -109,13 +109,13 @@ def sample_chrome():
         finally:
             if proc.poll() is None:
                 proc.terminate()
-    if not isinstance(values, list) or len(values) != 2 or not all(isinstance(v, str) for v in values):
+    if not isinstance(values, list) or len(values) != 3 or not all(isinstance(v, str) for v in values):
         raise ValueError("出口回执无效")
     ips = [ip for v in values if (ip := address(v))]
     unexpected = next((ip for ip in ips if ip != EXPECTED), None)
     if unexpected:
         state, ip = "mismatch", unexpected
-    elif len(ips) == 2:
+    elif len(ips) >= 2:
         state, ip = "verified", ips[0]
     elif ips:
         state, ip = "partial", ips[0]

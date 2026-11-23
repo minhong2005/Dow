@@ -166,7 +166,7 @@ input[type=radio], input[type=checkbox] { accent-color: var(--accent) }
 #menu { position: fixed; z-index: 9; min-width: 124px; padding: 4px }
 #menu button { width: 100%; justify-content: flex-start; padding: 5px 8px; border-radius: 3px }
 .danger { color: #e79b90 }
-#toast { position: fixed; z-index: 15; right: 14px; bottom: 34px; max-width: 70%; padding: 8px 12px }
+#toast { pointer-events: none; position: fixed; z-index: 15; right: 14px; bottom: 34px; max-width: 70%; padding: 8px 12px }
 @media (max-width: 1000px) {
   body { grid-template-columns: 42px 174px minmax(0,1fr) }
   body.hide-sidebar { grid-template-columns: 42px 0 minmax(0,1fr) }

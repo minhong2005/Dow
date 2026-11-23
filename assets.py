@@ -44,21 +44,26 @@ def matches(path, size, digest):
     return checksum.hexdigest() == digest
 
 
-def main():
+def cache_archive(name, url, size, digest):
     CACHE.mkdir(parents=True, exist_ok=True)
-    for name, url, size, digest in ARCHIVES:
-        target = CACHE / name
-        if matches(target, size, digest):
-            continue
-        with tempfile.TemporaryDirectory(dir=CACHE) as directory:
-            partial = Path(directory) / name
-            subprocess.run(
-                ["curl", "-fsSL", "--retry", "3", "-o", str(partial), url],
-                check=True,
-            )
-            if not matches(partial, size, digest):
-                raise SystemExit("Checksum mismatch for " + name)
-            partial.replace(target)
+    target = CACHE / name
+    if matches(target, size, digest):
+        return target
+    with tempfile.TemporaryDirectory(dir=CACHE) as directory:
+        partial = Path(directory) / name
+        subprocess.run(
+            ["curl", "-fsSL", "--retry", "3", "-o", str(partial), url],
+            check=True,
+        )
+        if not matches(partial, size, digest):
+            raise SystemExit("Checksum mismatch for " + name)
+        partial.replace(target)
+    return target
+
+
+def main():
+    for archive in ARCHIVES:
+        cache_archive(*archive)
 
 
 if __name__ == "__main__":

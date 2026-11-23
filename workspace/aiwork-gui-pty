@@ -25,7 +25,10 @@ if pid==0:
     size(0,cols,rows)
     for name in ("TMUX","TMUX_PANE"): os.environ.pop(name,None)
     os.environ.update(TERM="xterm-256color",LANG="C.UTF-8",LC_ALL="C.UTF-8")
-    os.execlp("tmux","tmux","-u","-L","default","attach-session","-t","="+job)
+    # Existing sessions also need wheel reporting when a GUI pane reconnects.
+    os.execlp("tmux", "tmux", "-u", "-L", "default",
+              "set-option", "-t", job + ":", "mouse", "on", ";",
+              "attach-session", "-t", "=" + job)
 
 pending=b""
 try:

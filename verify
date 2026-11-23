@@ -59,7 +59,12 @@ outage() {
   else
     dc start aiwork-gateway >/dev/null
   fi
-  check_ip
+  for attempt in {1..20}; do
+    if check_ip 2>/dev/null; then return; fi
+    sleep 1
+  done
+  echo '网关未能重新确认固定出口。' >&2
+  return 1
 }
 upstream=$(dc exec aiwork-gateway printenv UPSTREAM_IP)
 port=$(dc exec aiwork-gateway printenv UPSTREAM_PORT)

@@ -124,11 +124,6 @@ final class Workbench: NSObject, NSApplicationDelegate, WKScriptMessageHandler, 
     func userContentController(_ controller: WKUserContentController, didReceive msg: WKScriptMessage) {
         guard msg.frameInfo.isMainFrame, msg.frameInfo.request.url?.isFileURL == true,
               let value = msg.body as? [String:Any], let op = value["op"] as? String else { return }
-        if op == "copy", let text = value["text"] as? String {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text,forType:.string)
-            return
-        }
         if (op == "startup" || op == "checkBrowser") && child == nil { startBridge() }
         guard let pipe = input, var data = try? JSONSerialization.data(withJSONObject:value) else { return }
         data.append(10)
@@ -164,12 +159,31 @@ final class Workbench: NSObject, NSApplicationDelegate, WKScriptMessageHandler, 
         session.addItem(withTitle:"显示或隐藏侧栏",action:#selector(toggleSidebar),keyEquivalent:"b").target=self
         let edit = addMenu("编辑")
         for (title,selector,key) in [("撤销","undo:","z"),("剪切","cut:","x"),("复制","copy:","c"),("粘贴","paste:","v"),("全选","selectAll:","a")] {
-            edit.addItem(withTitle:title,action:NSSelectorFromString(selector),keyEquivalent:key)
+            if selector == "copy:" {
+                edit.addItem(withTitle:title, action:#selector(copySelection(_:)), keyEquivalent:key).target = self
+            } else {
+                edit.addItem(withTitle:title,action:NSSelectorFromString(selector),keyEquivalent:key)
+            }
         }
         let win=addMenu("窗口")
         win.addItem(withTitle:"最小化",action:#selector(NSWindow.performMiniaturize(_:)),keyEquivalent:"m")
         win.addItem(withTitle:"关闭窗口",action:#selector(NSWindow.performClose(_:)),keyEquivalent:"w")
         NSApp.mainMenu=bar; NSApp.windowsMenu=win
+    }
+    @objc private func copySelection(_ sender: NSMenuItem) {
+        web.evaluateJavaScript("window.selectedTerminalText?.()") { value, _ in
+            guard let text = value as? String else {
+                NSApp.sendAction(NSSelectorFromString("copy:"), to: nil, from: sender)
+                return
+            }
+            guard !text.isEmpty else {
+                self.web.evaluateJavaScript("notify('请先拖选文字，或双击选词后再复制')")
+                return
+            }
+            NSPasteboard.general.clearContents()
+            let copied = NSPasteboard.general.setString(text, forType: .string)
+            self.web.evaluateJavaScript(copied ? "notify('已复制到 Mac 剪贴板')" : "notify('写入 Mac 剪贴板失败')")
+        }
     }
     @objc private func newSession(){ web.evaluateJavaScript("window.newSession()") }
     @objc private func overview(){ web.evaluateJavaScript("window.overview()") }

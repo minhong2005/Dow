@@ -23,7 +23,7 @@ PAGE = """<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Dow 浏
     } catch { return ''; }
   }
   const samples = await Promise.all([sample('https://api.ipify.org/', false),
-    sample('https://www.cloudflare.com/cdn-cgi/trace', true)]);
+    sample('https://www.cloudflare.com/cdn-cgi/trace', true), sample('https://checkip.amazonaws.com/', false)]);
   try {
     const response = await fetch(location.pathname, {method:'POST', credentials:'omit',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify(samples), signal:AbortSignal.timeout(4000)});
@@ -51,7 +51,7 @@ class Page(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("Content-Security-Policy", f"default-src 'none'; script-src 'nonce-{TOKEN}'; "
-                         "connect-src 'self' https://api.ipify.org https://www.cloudflare.com; frame-ancestors 'none'; base-uri 'none'")
+                         "connect-src 'self' https://api.ipify.org https://www.cloudflare.com https://checkip.amazonaws.com; frame-ancestors 'none'; base-uri 'none'")
         self.send_header("Content-Length", str(len(PAGE)))
         self.end_headers()
         self.wfile.write(PAGE)
@@ -65,7 +65,7 @@ class Page(BaseHTTPRequestHandler):
             if not 0 < size <= 256:
                 raise ValueError()
             values = json.loads(self.rfile.read(size))
-            if not isinstance(values, list) or len(values) != 2 or not all(isinstance(v, str) for v in values):
+            if not isinstance(values, list) or len(values) != 3 or not all(isinstance(v, str) for v in values):
                 raise ValueError()
         except (ValueError, UnicodeError):
             self.send_error(400)

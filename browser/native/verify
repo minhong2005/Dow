@@ -84,7 +84,7 @@ def main():
         if not url.startswith("http://dow-"):raise RuntimeError("本机检查页未就绪")
         subprocess.run([*docker,"aiwork-tools","browser-open",url],check=True,timeout=45)
         expect("ready")
-        print(f"共享 Chrome：两个网站均返回 {expected}。",flush=True)
+        print(f"共享 Chrome：至少两个网站返回 {expected}。",flush=True)
         time.sleep(1)
         try:
             subprocess.run(["launchctl","bootout",domain+"/"+name],check=True)
@@ -97,7 +97,7 @@ def main():
         finally:restore()
         expect("blocked")
         expect("restored")
-        print("共享 Chrome：中转中断时请求失败，恢复后两个网站均返回指定地址。",flush=True)
+        print("共享 Chrome：中转中断时请求失败，恢复后至少两个网站返回指定地址。",flush=True)
     finally:
         if proc.poll() is None:
             try:proc.wait(timeout=2)
