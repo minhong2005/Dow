@@ -1,0 +1,27 @@
+#!/usr/bin/python3
+import os
+from pathlib import Path
+import plistlib
+import shutil
+import subprocess
+
+os.umask(0o077)
+base = Path(__file__).resolve().parent
+dest = Path.home()/'Library/Application Support/Dow/monitor'
+dest.mkdir(parents=True, exist_ok=True, mode=0o700)
+for name in ('monitor.py','agent_events.py','flow_store.py','daily.py','incident.py'):
+    tmp = dest/(name+'.new')
+    shutil.copyfile(base/name,tmp)
+    tmp.replace(dest/name)
+label = 'local.dow.monitor'
+plist = Path.home()/'Library/LaunchAgents'/(label+'.plist')
+plist.parent.mkdir(exist_ok=True)
+spec = dict(Label=label, ProgramArguments=['/usr/bin/python3','-I',str(dest/'monitor.py')],
+            RunAtLoad=True, StartInterval=30, ProcessType='Background')
+tmp = plist.with_suffix('.new')
+tmp.write_bytes(plistlib.dumps(spec))
+tmp.replace(plist)
+domain = 'gui/'+str(os.getuid())
+if subprocess.run(['launchctl','print',domain+'/'+label],capture_output=True).returncode == 0:
+    subprocess.run(['launchctl','bootout',domain+'/'+label],check=True)
+subprocess.run(['launchctl','bootstrap',domain,str(plist)],check=True)

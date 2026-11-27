@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Independent task terminals on the default tmux server and disposable views on a second server."""
 import curses
+from datetime import datetime
+import sqlite3
+from zoneinfo import ZoneInfo
 import fcntl
 import json
 import locale
@@ -13,7 +16,7 @@ import sys
 import unicodedata
 import uuid
 
-APP = "/usr/local/bin/aiwork-sessions"
+APP = str(Path(__file__).resolve())
 TOOL_NAMES = {"claude": "Claude Code", "codex": "Codex", "agy": "Antigravity"}
 TOOLS = tuple(TOOL_NAMES)
 UI = "aiwork-views"
@@ -71,13 +74,6 @@ def api(args):
         if tool not in TOOLS:
             raise ValueError("请选择有效的工具")
         project, title = project.strip() or "main", title.strip()
-        if not title:
-            titles = {r[3] for r in rows if r[1]==project}
-            title = TOOL_NAMES[tool]
-            suffix = 2
-            while title in titles:
-                title = f"{TOOL_NAMES[tool]} {suffix}"
-                suffix += 1
         return create(tool,project,title)
     row = next((r for r in rows if params and r[0]==params[0]),None)
     if row is None:
@@ -95,6 +91,25 @@ def api(args):
     return ident
 
 
+def automatic_title(tool, project):
+    day = datetime.now(ZoneInfo(os.environ["TZ"]) if os.environ.get("TZ") else None).date().isoformat()
+    prefix = f"{TOOL_NAMES[tool]}-{day}-"
+    state = Path.home() / ".local/state/dow"
+    state.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(state / "session-names.sqlite3", timeout=10) as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("CREATE TABLE IF NOT EXISTS sequence (project TEXT, prefix TEXT, number INTEGER, PRIMARY KEY(project,prefix))")
+        saved = db.execute("SELECT number FROM sequence WHERE project=? AND prefix=?", (project,prefix)).fetchone()
+        highest = saved[0] if saved else 0
+        for _, existing_project, _, name, _ in jobs():
+            suffix = name[len(prefix):]
+            if existing_project == project and name.startswith(prefix) and re.fullmatch(r"[0-9]{1,9}", suffix):
+                highest = max(highest, int(suffix))
+        number = highest + 1
+        db.execute("INSERT OR REPLACE INTO sequence VALUES (?,?,?)", (project,prefix,number))
+    return f"{prefix}{number:02d}"
+
+
 def create(tool, project, title, old_pane=None):
     if tool not in TOOLS or not project or project in (".", "..") or "/" in project:
         raise ValueError("请输入有效的项目名称")
@@ -102,6 +117,8 @@ def create(tool, project, title, old_pane=None):
     if folder.parent != Path("/work"):
         raise ValueError("请选择工作区内的项目")
     folder.mkdir(exist_ok=True)
+    if not title:
+        title = automatic_title(tool, project)
     job = "job-" + uuid.uuid4().hex[:12]
     # During adoption, swap the existing PTY into its new session. Its original
     # position becomes a client of that same PTY. The tool process keeps its PID.
@@ -271,14 +288,14 @@ def menu(screen):
                 tool=ask("  ".join(f"{i} {TOOL_NAMES[name]}" for i,name in enumerate(TOOLS,1)))
                 if tool not in {str(i) for i in range(1,len(TOOLS)+1)}:continue
                 app=TOOLS[int(tool)-1]; project=ask("项目",project)
-                title=ask("任务名",TOOL_NAMES[app])
+                title=ask("任务名（留空自动命名）")
                 show([create(app,project,title)])
             elif key in (ord('a'),ord('A')):
                 project=ask("三工具所在项目",project)
                 ids=[]
                 for app in TOOLS:
                     live=next((r[0] for r in rows if r[1]==project and r[2]==app and r[4]=="0"),None)
-                    ids.append(live or create(app,project,app))
+                    ids.append(live or create(app,project,""))
                 show(ids)
             elif rows and key==32:
                 j=rows[current][0]
@@ -311,5 +328,5 @@ if __name__=="__main__":
         init()
         rows=jobs()
         show([next((r[0] for r in rows if r[1]=="main" and r[2]==app and r[4]=="0"),None)
-              or create(app,"main",app) for app in TOOLS])
+              or create(app,"main","") for app in TOOLS])
     elif sys.argv[1:]==["menu"]:curses.wrapper(menu)

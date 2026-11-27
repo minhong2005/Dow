@@ -117,7 +117,7 @@ function bindTerminalSelection(box, terminal) {
     // Single clicks belong to the running tool. Text gestures belong to xterm.
     let selecting = down.detail >= 2;
     function press(localSelection) {
-      terminal.element.dispatchEvent(new MouseEvent('mousedown', {
+      down.target.dispatchEvent(new MouseEvent('mousedown', {
         view:window, bubbles:true, cancelable:true, button:0, buttons:1,
         detail:down.detail, clientX:down.clientX, clientY:down.clientY, altKey:localSelection
       }));
@@ -157,6 +157,29 @@ window.selectedTerminalText = () => {
   }
   return null;
 };
+// Codex draws its login URL on separate rows, even when xterm marks none as wrapped.
+function codexLoginLinks(terminal, activate) {
+  const prefix = 'https://auth.openai.com/oauth/authorize?';
+  return {provideLinks(row, done) {
+    const buffer = terminal.buffer.active;
+    const line = y => buffer.getLine(y - 1)?.translateToString(true) || '';
+    const continuation = /^[A-Za-z0-9%._~!$&()*+,;=:@/?#-]+$/;
+    let start = row;
+    while (start > 1 && row - start < 40 && !line(start).trimStart().startsWith('https://') &&
+           continuation.test(line(start))) start--;
+    const first = line(start);
+    const column = first.length - first.trimStart().length;
+    let url = first.slice(column);
+    if (!url.startsWith('https://') || /\s/.test(url)) return done(undefined);
+    let end = start;
+    while (end - start < 40 && continuation.test(line(end + 1))) url += line(++end);
+    if (row > end || !url.startsWith(prefix)) return done(undefined);
+    const params = new URL(url).searchParams;
+    const complete = ['client_id','state','code_challenge','redirect_uri','response_type'].every(k => params.get(k));
+    const open = complete ? activate : () => notify('登录链接显示不完整，请在 Codex 中重新发起登录。');
+    done([{text:url, range:{start:{x:column+1,y:start},end:{x:line(end).length,y:end}}, activate:open}]);
+  }};
+}
 function mount(j){
   const view='view'+(++sequence),section=document.createElement('article');
   section.className='pane';section.dataset.job=j.id;section.setAttribute('aria-label',j.title);
@@ -168,6 +191,7 @@ function mount(j){
     theme:{background:'#181818',foreground:'#f0f0f0',cursor:'#e4e4e4',selectionBackground:'#42464c',black:'#252525',red:'#e58383',green:'#72bc91',yellow:'#d4b179',blue:'#81a1c1',magenta:'#ba9fc3',cyan:'#8bb8ba',white:'#f0f0f0'},
     linkHandler:{activate:openLink}});
   const fit=new FitAddon.FitAddon();terminal.loadAddon(fit);
+  terminal.registerLinkProvider(codexLoginLinks(terminal, openLink));
   terminal.loadAddon(new WebLinksAddon.WebLinksAddon(openLink));
   terminal.open(box);
   const p={j:j.id,view,section,top,terminal,fit,attached:false,frame:0};

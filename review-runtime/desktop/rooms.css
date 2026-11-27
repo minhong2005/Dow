@@ -1,0 +1,29 @@
+#roomsPane {display:flex; flex-direction:column; flex:1; min-height:0; background:var(--editor)}
+#roomsPane[hidden] {display:none}
+.rooms-bar {min-height:49px; padding:0 18px; display:flex; align-items:center; gap:14px; border-bottom:1px solid var(--line)}
+.rooms-bar h1 {font-size:15px; font-weight:580; margin:0 auto 0 0}
+#roomsPane select {color:var(--text); color-scheme:dark; background:var(--sidebar); border:1px solid var(--line); border-radius:5px; padding:5px; max-width:100%}
+#roomList {width:clamp(100px,28%,300px)}
+.room-layout {flex:1; min-height:0; display:grid; grid-template-columns:minmax(0,1fr) clamp(160px,24%,240px)}
+.room-conversation {min-height:0; min-width:0; display:flex; flex-direction:column}
+#roomFeed {flex:1; min-height:0; overflow:auto; padding:18px clamp(12px,2.3vw,32px); user-select:text}
+.room-roster {overflow:auto; border-left:1px solid var(--line); padding:15px 12px}
+.room-roster h2 {font-size:12px; margin:0 0 12px; color:var(--secondary)}
+.roster-row {display:grid; grid-template-columns:26px minmax(0,1fr); align-items:center; gap:6px 8px; padding:10px 0;border-top:1px solid var(--line)}
+.roster-row label {display:flex; align-items:center; justify-content:space-between; font-size:12px;font-weight:550}
+.roster-row select {grid-column:2;width:100%; font-size:11px}
+.room-avatar {width:25px;height:25px;object-fit:contain; padding:3px;border-radius:5px;background:#292a2d}
+.room-user {display:inline-grid;place-items:center;font-size:12px}
+.room-intro {margin:clamp(24px,8vh,76px) auto 0; max-width:560px}
+.room-intro h2 {font-size:24px;line-height:1.35;letter-spacing:-.03em;margin:0 0 10px}
+.room-intro p,.room-state {color:var(--secondary);font-size:12px;line-height:1.6}
+.room-message {display:grid;grid-template-columns:28px minmax(0,1fr);gap:9px;max-width:820px;margin:0 auto 20px}
+.room-message header {display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:13px}
+.room-message small,.room-round {color:var(--muted);font-size:11px}
+.room-message p {white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.64;margin:5px 0 0}
+.room-round {margin:0 0 16px;border-bottom:1px solid var(--line);padding:3px 0 8px}
+.room-final {border-left:2px solid #a1af9a;padding-left:10px}
+#roomControls {padding:12px 18px;border-top:1px solid var(--line)}
+#roomControls textarea {width:100%;resize:vertical;min-height:62px;max-height:30vh;padding:10px;background:var(--sidebar);border:1px solid var(--line);border-radius:6px;color:var(--text);font:inherit;user-select:text}
+.room-buttons {display:flex;align-items:center;gap:7px;justify-content:flex-end;margin:5px 0}
+.room-state {margin-right:auto}

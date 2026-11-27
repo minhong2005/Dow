@@ -1,5 +1,9 @@
 # Dow
 
+**开发评审（2026-11-27）** · [运行问题、已做修正与待评审设计](docs/runtime-review.md) · [本地运行版核心源码快照](review-runtime/)
+
+根目录保留公开版安装入口。评审快照涵盖派单、项目隔离、窗口共享与监控；目前这些模块尚未全部接入公开安装器。
+
 Dow 是一款用于 Apple Silicon Mac 的多智能体工作台。它把 Claude Code、Codex 和 Antigravity 的终端会话放进同一个窗口，也让远端 Mac 上受管理的终端和 Google Chrome 通过你自己的美国家庭静态公网 IPv4 联网。
 
 ## 为什么做 Dow

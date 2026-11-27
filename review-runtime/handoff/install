@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""Pair one running isolated Antigravity workspace with one resumed legacy Codex chat."""
+import argparse
+import hashlib
+from pathlib import Path
+import re
+import shutil
+import sys
+import tempfile
+import uuid
+HERE=Path(__file__).resolve().parent
+sys.dont_write_bytecode=True
+sys.path.insert(0,str(HERE.parent/"desktop"))
+import project_runtime as rt
+
+def install(sender,receiver):
+    catalog=rt.catalog()
+    source,a=catalog[sender]; target,c=catalog[receiver]
+    if (a["tool"],a["scope"],c["tool"],c["scope"])!=("agy","isolated","codex","shared") or a["project"]!=c["project"] or any(row["exited"] or row["archived"] for row in (a,c)):
+        raise ValueError("请选择同项目中运行的独立 Antigravity 和旧共享 Codex")
+    pid=rt.docker("exec",target,"tmux","display-message","-p","-t","="+receiver+":","#{pane_pid}")
+    command=rt.docker("exec",target,"cat","/proc/"+str(int(pid))+"/cmdline").split("\0")
+    if command[0]!="/opt/codex/bin/codex" or "resume" not in command:
+        raise ValueError("无法从运行中的 Codex 确定具体对话")
+    thread=str(uuid.UUID(command[command.index("resume")+1]))
+    workdir="/work/"+a["project"]
+    root=rt.project_root(rt.inspect(target))/a["project"]
+    origin=Path(next(m["Source"] for m in rt.inspect(source)["Mounts"] if m["Destination"]==workdir))
+    canonical=rt.project_copy.workspace_path(rt.copy_store(root.parent,source))
+    if origin.resolve(strict=True)!=canonical:raise ValueError("派单工作区挂载不匹配")
+    pair=hashlib.sha256((source+receiver+thread).encode()).hexdigest()[:16]
+    name="dow-handoff-"+pair
+    h=origin/"handoff";queue=h/".dow-dispatch";delivery=root/(".dow-handoff-"+pair)
+    for folder in (h,queue,delivery):
+        folder.mkdir(mode=0o700,exist_ok=True)
+        expected_path = canonical/folder.relative_to(origin) if folder.is_relative_to(origin) else folder
+        if folder.resolve()!=expected_path:raise ValueError("交接目录不能为符号链接")
+    live=rt.docker("ps","-a","--filter","name=^/"+name+"$","--format","{{.Names}}")==name
+    if queue.exists() and any(queue.glob("*.request.json")) and not live:
+        raise ValueError("旧投递目录中有请求；请核对既有配对再恢复")
+    wheel=Path.home()/"Library/Caches/aiwork/websocket_client-1.9.0-py3-none-any.whl"
+    if hashlib.sha256(wheel.read_bytes()).hexdigest()!="af248a825037ef591efbf6ed20cc5faa03d3b47b9e5a2230a529eeee1c1fc3ef":
+        raise ValueError("本地 WebSocket 依赖校验失败")
+    with tempfile.TemporaryDirectory() as temp:
+        stage=Path(temp)
+        for f in ("client.py","service.py","files.py"):shutil.copy2(HERE/f,stage/f)
+        shutil.copy2(HERE.parent/"desktop/project_copy.py",stage/"project_copy.py")
+        shutil.copy2(wheel,stage/"websocket.whl")
+        (stage/"Dockerfile").write_text("FROM dow-project:1\nUSER root\nRUN mkdir -p /state /opt/dow && chown node /state\nCOPY *.py websocket.whl /opt/dow/\nUSER node\nENTRYPOINT [\"/usr/bin/python3\",\"-IBu\",\"/opt/dow/service.py\"]\n")
+        rt.docker("build","--network","none","--pull=false","-t","dow-handoff:1",temp,timeout=90)
+    if live:
+        existing=rt.inspect(name)
+        expected={"DOW_THREAD="+thread,"DOW_TARGET_DIR="+workdir+"/"+delivery.name}
+        mounts={m["Destination"]:m["Source"] for m in existing["Mounts"]}
+        if not expected.issubset(set(existing["Config"]["Env"])) or mounts.get("/exchange")!=str(queue) or mounts.get("/delivery")!=str(delivery):
+            raise ValueError("现有服务配对与选中会话不一致")
+        if existing["Image"]!=rt.docker("image","inspect","--format","{{.Id}}","dow-handoff:1"):
+            rt.docker("stop",name)
+            rt.docker("rm",name)
+            live=False
+    if not live:
+        rt.docker("run","-d","--name",name,"--restart","unless-stopped","--network","none","--read-only",
+                  "--cap-drop","ALL","--security-opt","no-new-privileges","--env","DOW_THREAD="+thread,
+                  "--env","DOW_TARGET_DIR="+workdir+"/"+delivery.name,
+                  "--mount",rt.mount("type=bind","source="+str(queue),"target=/exchange","bind-recursive=disabled"),
+                  "--mount",rt.mount("type=bind","source="+str(delivery),"target=/delivery","bind-recursive=disabled"),
+                  "--mount","type=volume,source="+name+"-state,target=/state",
+                  "--mount","type=volume,source=aiwork-home,volume-subpath=.local/state/aiwork-codex,volume-nocopy,target=/control,readonly",
+                  "dow-handoff:1")
+    elif not rt.inspect(name)["State"]["Running"]:rt.docker("start",name)
+    # The client is also callable directly from an already-open Antigravity shell.
+    shared="/home/node/.local/state/aiwork/dow-handoff"
+    rt.docker("exec",target,"mkdir","-p",shared)
+    for f in [HERE/"client.py",HERE/"files.py",HERE.parent/"desktop/project_copy.py"]:
+        rt.docker("cp",str(f),target+":"+shared+"/"+f.name+".new")
+        rt.docker("exec",target,"mv","-f",shared+"/"+f.name+".new",shared+"/"+f.name)
+    launcher=h/"dow-codex"
+    text='#!/bin/sh\nexec /usr/bin/python3 -IB '+shared+'/client.py "$@"\n'
+    if launcher.exists() and launcher.read_text()!=text:raise ValueError("同名入口已存在")
+    launcher.write_text(text);launcher.chmod(0o755)
+    rt.docker("exec",source,"agy","mcp","add","--type","stdio","dow-codex","/usr/bin/python3","-IB",shared+"/client.py","mcp")
+    guide=h/"Dow派单.md"
+    if guide.is_symlink():raise ValueError("交接说明路径无效")
+    guide.write_bytes((HERE/"USAGE.md").read_bytes())
+    print(name)
+
+if __name__=="__main__":
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument("sender");p.add_argument("receiver")
+    args=p.parse_args();install(args.sender,args.receiver)
