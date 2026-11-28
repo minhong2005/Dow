@@ -26,6 +26,7 @@ IMAGE = "dow-project:1"
 HOME = "/home/node"
 BRIDGE = HOME + "/.local/state/aiwork"
 TOOLS = ("claude", "codex", "agy")
+SHARED_WORK = "/work/.dow-shared"
 SESSION_CONTAINER = re.compile(r"dow-session-[a-f0-9]{24}")
 PROJECT_CONTAINER = re.compile(r"dow-(?:session-|project-(?:protected-)?)[a-f0-9]{24}")
 STATE = Path.home() / "Library/Application Support/aiwork-desktop"
@@ -51,7 +52,7 @@ def mount(*fields):
 
 def project_id(project, protected=True):
     if (not isinstance(project, str) or not project or len(project) > 100
-            or project in {".", ".."} or "/" in project
+            or project in {".", "..", ".dow-shared"} or "/" in project
             or any(ord(c) < 32 or ord(c) == 127 for c in project)):
         raise ValueError("请输入有效的项目名称")
     prefix = "dow-project-protected-" if protected else "dow-project-"
@@ -106,7 +107,7 @@ def available(running=True):
     return sorted(name for name in docker(*command).splitlines() if PROJECT_CONTAINER.fullmatch(name))
 
 
-def ensure(project, name=None, source_store=None):
+def ensure(project, name=None, source_store=None, tool=None):
     project_name = project_id(project)
     name = name or project_name
     if name != project_name and not SESSION_CONTAINER.fullmatch(name):
@@ -124,8 +125,30 @@ def ensure(project, name=None, source_store=None):
         workspace = copy_store(root, name) / "workspace"
         workdir = "/work/" + project
         net = "container:" + controller["Id"]
+        endpoint = "aiwork-home"
         volume = project_name + "-home"
+        extra = []
+        bridge_fields = ["volume-subpath=.local/state/aiwork"]
+        if tool:
+            launcher = Path(__file__).resolve().with_name("shared") / "workbench"
+            if not launcher.exists():
+                launcher = Path(__file__).resolve().parent.parent / "shared/workbench"
+            subprocess.run([sys.executable, str(launcher), tool, project, "--prepare"], check=True,
+                           env=dict(os.environ, PATH=str(Path(DOCKER[0]).parent)+":"+os.environ.get("PATH","")))
+            endpoint = "dow-shared-" + tool + "-v1-endpoint"
+            volume = "dow-shared-" + tool + "-v1-home"
+            bridge_fields = []
+            extra = ["--label", "org.dow.shared.tool="+tool]
+            pilot = inspect("dow-shared-"+tool+"-v1")
+            if any(m["Destination"]=="/opt/dow-pillow" for m in pilot["Mounts"]):
+                extra += ["--mount",mount("type=volume","source=aiwork-home","target=/opt/dow-pillow",
+                          "volume-subpath=.local/state/aiwork/python-libs/pillow-13.0.0","readonly"),
+                          "--env","PYTHONPATH=/opt/dow-pillow"]
         if name not in available(running=False):
+            shared = root / ".dow-shared"
+            shared.mkdir(mode=0o700, exist_ok=True)
+            if shared.is_symlink() or not shared.is_dir():
+                raise RuntimeError("共享工作目录无效")
             codex = inspect("aiwork-codex")
             policy = next((opt[len("seccomp="):] for opt in codex["HostConfig"]["SecurityOpt"]
                            if opt.startswith("seccomp={")), "")
@@ -134,7 +157,7 @@ def ensure(project, name=None, source_store=None):
             with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as profile:
                 profile.write(policy)
                 profile.flush()
-                docker("create", "--name", name, "--label", f"{PROJECT_LABEL}={project}",
+                docker("create", *extra, "--name", name, "--label", f"{PROJECT_LABEL}={project}",
                        "--init", "--network", net, "--cap-drop", "ALL", "--read-only",
                        "--security-opt", "no-new-privileges", "--security-opt", "apparmor=dow-codex",
                        "--security-opt", "seccomp=" + profile.name,
@@ -142,18 +165,25 @@ def ensure(project, name=None, source_store=None):
                        "--tmpfs", "/run:rw,nosuid,nodev,mode=755",
                        "--mount", mount("type=bind", "source=" + str(workspace), "target=" + workdir,
                                         "bind-recursive=disabled"),
+                       "--mount", mount("type=bind", "source=" + str(shared), "target=" + SHARED_WORK,
+                                        "bind-recursive=disabled"),
                        "--mount", mount("type=volume", "source=" + volume, "target=" + HOME),
-                       "--mount", mount("type=volume", "source=aiwork-home", "target=" + BRIDGE,
-                                        "volume-nocopy", "volume-subpath=.local/state/aiwork", "readonly"),
+                       "--mount", mount("type=volume", "source="+endpoint, "target=" + BRIDGE,
+                                        "volume-nocopy", *bridge_fields, "readonly"),
                        "--env", "TZ=America/Chicago", "--env", "DOW_PROJECT=" + project, "--env", "DOW_SINGLE_SESSION=" + str(int(bool(SESSION_CONTAINER.fullmatch(name)))), "--workdir", workdir, IMAGE)
         info = inspect(name)
         host = info["HostConfig"]
         paths = {m["Destination"]: m for m in info["Mounts"]}
+        allowed_paths = {workdir, HOME, BRIDGE, SHARED_WORK}
+        if "/opt/dow-pillow" in paths and tool:
+            allowed_paths.add("/opt/dow-pillow")
         if (info["Config"]["Labels"].get(PROJECT_LABEL) != project or host["NetworkMode"] != net
                 or not host["ReadonlyRootfs"] or host["Privileged"]
-                or set(paths) != {workdir, HOME, BRIDGE}
+                or set(paths) not in ((allowed_paths,) if tool else ({workdir, HOME, BRIDGE}, allowed_paths))
+                or (SHARED_WORK in paths and (paths[SHARED_WORK]["Source"] != str(root / ".dow-shared")
+                    or paths[SHARED_WORK]["Type"] != "bind" or not paths[SHARED_WORK]["RW"]))
                 or paths[workdir]["Source"] != str(workspace) or paths[HOME].get("Name") != volume
-                or paths[BRIDGE].get("Name") != "aiwork-home" or paths[BRIDGE]["RW"]):
+                or paths[BRIDGE].get("Name") != endpoint or paths[BRIDGE]["RW"]):
             raise RuntimeError("项目环境的挂载或网络与保存的配置不符")
         if not info["State"]["Running"]:
             docker("start", name)
@@ -199,6 +229,8 @@ def session_folder(container, row):
     with (STATE / "projects.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if SESSION_CONTAINER.fullmatch(container):
+            if inspect(container)["Config"]["Labels"].get("org.dow.shared.tool"):
+                return session_folders.named_directory(copy_store(root,container), root / ".dow-shared", session_folders.safe_name(row["title"]))
             return session_folders.assign(root, copy_store(root, container), row)
         target = "/work/" + row["project"]
         mounts = inspect(container)["Mounts"]
@@ -235,7 +267,7 @@ def new_session(project, tool, title="", source=None):
         if row["scope"] in ("protected", "isolated"):
             source_store = container
     try:
-        _, filtered = ensure(project, name, source_store)
+        _, filtered = ensure(project, name, source_store, tool=tool)
         title = sessions(name, "allocate-title", tool, project, title)
         session_folder(name, {"project": project, "title": title})
         ident = sessions(name, "create", tool, project, title)

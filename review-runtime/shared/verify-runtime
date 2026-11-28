@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Exercise a parallel workbench without changing a running agent or its profile."""
+from pathlib import Path
+import hashlib
+import json
+import os
+import secrets
+import subprocess
+import tempfile
+import time
+
+docker = ["docker", "--context", os.environ.get("DOW_CONTEXT","colima-dow")]
+image = "dow-project:1"
+bridge = "/home/node/.local/state/aiwork"
+tag = "dow-verify-" + secrets.token_hex(5)
+containers, volumes = [], []
+
+def call(*args):
+    return subprocess.check_output([*docker,*args],text=True,timeout=90).strip()
+
+def start(name, *args):
+    call("run","-d","--name",name,"--cap-drop","ALL","--security-opt","no-new-privileges",
+         "--read-only","--tmpfs","/tmp:rw,nosuid,nodev,mode=1777",*args)
+    containers.append(name)
+
+def execute(name,*args):
+    return call("exec",name,*args)
+
+def request(name, data):
+    script = """import socket,sys,json
+s=socket.socket(socket.AF_UNIX);s.settimeout(45);s.connect(sys.argv[1]);s.sendall(sys.argv[2].encode()+b'\\n');print(s.makefile().readline())"""
+    return json.loads(execute(name,"python3","-c",script,bridge+"/native.sock",json.dumps(data)))
+
+with tempfile.TemporaryDirectory(dir=Path.cwd()) as work:
+    try:
+        net = tag+"-net"
+        start(net,"--network","none","--mount","source=aiwork-link,target=/link,readonly",
+              "--entrypoint","socat",image,"TCP4-LISTEN:7890,bind=127.0.0.1,reuseaddr,fork","UNIX-CONNECT:/link/out.sock")
+        workers = []
+        expected=(Path.home()/".config/dow/expected-ip")
+        # Deployment can supply its verified exit without installing the public configuration.
+        ip=os.environ.get("DOW_EXPECTED_IP") or expected.read_text().strip()
+        for tool in ("claude","codex","agy"):
+            name=tag+"-"+tool
+            vol=name+"-endpoint"
+            call("volume","create",vol);volumes.append(vol)
+            # Seed the new volume from a node-owned directory in the tools image.
+            call("run","--rm","--network","none","--mount",f"source={vol},target={bridge}",
+                 "--entrypoint","true",image)
+            start(name+"-bridge","--network","none","--mount",f"source={vol},target=/endpoint",
+                  "--mount","source=aiwork-home,target=/upstream,volume-subpath=.local/state/aiwork,readonly",
+                  "--mount",f"type=bind,source={Path(__file__).resolve().with_name('browser_bridge.py')},target=/bridge.py,readonly",
+                  "--entrypoint","python3",image,"-IB","/bridge.py",tool)
+            start(name,"--network","container:"+net,"--mount",f"source={vol},target={bridge},readonly",
+                  "--mount",f"type=bind,source={work},target=/work/shared",
+                  "--entrypoint","sleep",image,"infinity")
+            workers.append(name)
+            execute(name,"sh","-ec",'command -v "$1" >/dev/null','check',tool)
+            other="claude" if tool!="claude" else "codex"
+            denied=request(name,{"action":"show","profile":other})
+            assert denied["ok"] is False and "其他浏览器" in denied["error"],denied
+            assert request(name,{"action":"show","profile":tool})["ok"]
+            got=execute(name,"curl","-fsS","--max-time","12","https://api.ipify.org")
+            assert got==ip,(tool,"exit mismatch")
+            print(tool,"browser and terminal exit OK",flush=True)
+        execute(workers[1],"sh","-ec","head -c 16777216 /dev/urandom > /work/shared/sample")
+        sums=[execute(w,"sha256sum","/work/shared/sample").split()[0] for w in workers]
+        assert len(set(sums))==1
+        # Pause just the test relay. Existing workers retain the same network namespace.
+        call("pause",net)
+        try:
+            for w in workers:
+                execute(w,"python3","-c","import socket;assert [n for _,n in socket.if_nameindex()]==['lo']")
+                execute(w,"sh","-ec","if curl -fsS --max-time 2 https://api.ipify.org >/dev/null 2>&1; then exit 1; fi; if curl --noproxy '*' -fsS --max-time 2 https://1.1.1.1 >/dev/null 2>&1; then exit 1; fi")
+        finally:
+            call("unpause",net)
+        print("Cross-workspace 16 MiB and terminal relay failure checks passed")
+    finally:
+        for n in reversed(containers): subprocess.run([*docker,"rm","-f",n],stdout=subprocess.DEVNULL)
+        for v in volumes: subprocess.run([*docker,"volume","rm",v],stdout=subprocess.DEVNULL)

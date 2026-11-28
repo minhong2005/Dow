@@ -130,7 +130,12 @@ def workspace_path(store):
         return anchor
     link = Path(os.readlink(anchor))
     hub = store.parent.parent / FOLDERS
-    if (len(link.parts) != 4 or link.parts[:3] != ("..", "..", FOLDERS)
+    if len(link.parts)==5 and link.parts[:2]==("..","..") and link.parts[3]==".dow-shared":
+        base = store.parent.parent / link.parts[2]
+        hub = base / ".dow-shared"
+        if link.parts[2] in (".","..") or base.is_symlink() or hub.is_symlink() or link.name.startswith("."):
+            raise ValueError("共享会话目录异常")
+    elif (len(link.parts) != 4 or link.parts[:3] != ("..", "..", FOLDERS)
             or link.name.startswith(".") or hub.is_symlink()):
         raise ValueError("会话工作目录链接异常")
     resolved = anchor.resolve(strict=True)

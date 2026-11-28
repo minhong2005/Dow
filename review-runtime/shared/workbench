@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Open a tool in a parallel Dow workbench with a shared disk and a pinned browser."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+
+parser = argparse.ArgumentParser()
+parser.add_argument("tool", choices=("claude","codex","agy"))
+parser.add_argument("project")
+parser.add_argument("--prepare",action="store_true",help="prepare the worker without opening the CLI")
+args=parser.parse_args()
+if not re.fullmatch(r"[\w][\w .-]{0,79}",args.project):
+    parser.error("项目名须以字母、汉字、数字或下划线开头，不支持路径")
+docker=["docker","--context",os.environ.get("DOW_CONTEXT","colima-dow")]
+def call(*items):
+    return subprocess.check_output([*docker,*items],text=True).strip()
+
+def ensure(name,spec):
+    if not call("ps","-a","--filter","name=^/"+name+"$","--format","{{.Names}}"):
+        call("create","--name",name,"--label","org.dow.shared=v1","--cap-drop","ALL",
+             "--security-opt","no-new-privileges","--read-only","--tmpfs","/tmp:rw,nosuid,nodev,mode=1777",*spec)
+    info=json.loads(call("inspect",name))[0]
+    if info["Config"]["Labels"].get("org.dow.shared")!="v1":
+        raise RuntimeError("工作机名称已被占用")
+    if not info["State"]["Running"]:
+        call("start",name)
+
+image="dow-project:1"
+state=Path.home()/"Library/Application Support/Dow/shared-runtime"
+state.mkdir(parents=True,exist_ok=True,mode=0o700)
+controller=json.loads(call("inspect","aiwork-tools"))[0]
+if controller["HostConfig"]["NetworkMode"] != "none":
+    raise RuntimeError("工作台直连隔离未就绪")
+work=Path(next(m["Source"] for m in controller["Mounts"] if m["Destination"]=="/work"))/".dow-shared"
+if work.is_symlink():
+    raise RuntimeError("共享工作目录不能是符号链接")
+work.mkdir(exist_ok=True,mode=0o700)
+# Create the project from inside the restricted mount so a symlink cannot lead into the host.
+net="dow-shared-net-v1"
+name="dow-shared-"+args.tool+"-v1"
+volume=name+"-endpoint"
+bridge="/home/node/.local/state/aiwork"
+with (state/"setup.lock").open("a") as lock:
+    fcntl.flock(lock,fcntl.LOCK_EX)
+    ensure(net,["--network","none","--mount","source=aiwork-link,target=/link,readonly",
+                "--entrypoint","socat",image,"TCP4-LISTEN:7890,bind=127.0.0.1,reuseaddr,fork","UNIX-CONNECT:/link/out.sock"])
+    if not call("volume","ls","--filter","name=^"+volume+"$","--format","{{.Name}}"):
+        call("volume","create",volume)
+        call("run","--rm","--network","none","--mount",f"source={volume},target={bridge}","--entrypoint","true",image)
+    ensure(name+"-browser",["--network","none","--mount",f"source={volume},target=/endpoint",
+           "--mount","source=aiwork-home,target=/upstream,volume-subpath=.local/state/aiwork,readonly",
+           "--mount",f"type=bind,source={Path(__file__).resolve().with_name('browser_bridge.py')},target=/bridge.py,readonly",
+           "--entrypoint","python3",image,"-IB","/bridge.py",args.tool])
+    libraries=[]
+    if subprocess.run([*docker,"exec","aiwork-tools","test","-d",bridge+"/python-libs/pillow-13.0.0/PIL"]).returncode==0:
+        libraries=["--mount","source=aiwork-home,target=/opt/dow-pillow,volume-subpath=.local/state/aiwork/python-libs/pillow-13.0.0,readonly","--env","PYTHONPATH=/opt/dow-pillow"]
+    ensure(name,[*libraries,"--network","container:"+net,"--mount",f"type=bind,source={work},target=/work",
+           "--mount",f"source={name}-home,target=/home/node","--mount",f"source={volume},target={bridge},readonly",
+           "--env","TZ=America/Chicago","--entrypoint","sleep",image,"infinity"])
+folder="/work/"+args.project
+call("exec",name,"mkdir","-p","--",folder)
+if not args.prepare:
+    os.execvp(docker[0],[*docker,"exec","-it","-w",folder,name,args.tool])
