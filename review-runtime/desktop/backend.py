@@ -376,6 +376,20 @@ if __name__=="__main__":
         spec.loader.exec_module(module)
         module.serve_device(closing, emit)
     threading.Thread(target=watch_windows_device,daemon=True).start()
+    def maintain_running_sessions():
+        helper = Path(__file__).with_name("shared") / "refresh-existing"
+        reported = False
+        while not closing.is_set():
+            try:
+                subprocess.run([sys.executable, "-IB", str(helper)], check=True, timeout=180,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                reported = False
+            except (OSError, subprocess.SubprocessError):
+                if not reported:
+                    emit("notice", message="会话运行环境尚未更新，Dow 将自动重试。")
+                reported = True
+            closing.wait(90)
+    threading.Thread(target=maintain_running_sessions,daemon=True).start()
     threading.Thread(target=work,daemon=True).start()
     threading.Thread(target=poll,daemon=True).start()
     threading.Thread(target=watch_chrome,daemon=True).start()

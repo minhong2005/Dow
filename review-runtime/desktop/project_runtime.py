@@ -18,6 +18,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import project_copy
 import session_folders
+import account_profiles
 
 DOCKER = ("/opt/homebrew/bin/docker", "--context", "colima-dow")
 CONTROLLER = "aiwork-tools"
@@ -136,9 +137,13 @@ def ensure(project, name=None, source_store=None, tool=None):
             subprocess.run([sys.executable, str(launcher), tool, project, "--prepare"], check=True,
                            env=dict(os.environ, PATH=str(Path(DOCKER[0]).parent)+":"+os.environ.get("PATH","")))
             endpoint = "dow-shared-" + tool + "-v1-endpoint"
-            volume = "dow-shared-" + tool + "-v1-home"
+            identity = account_profiles.profiles(STATE, tool, "dow-account-"+tool)
+            volume = identity["home"]
             bridge_fields = []
             extra = ["--label", "org.dow.shared.tool="+tool]
+            for directory, account_volume in identity["directories"].items():
+                extra += ["--mount", mount("type=volume","source="+account_volume,
+                          "volume-subpath="+directory,"target="+HOME+"/"+directory,"volume-nocopy")]
             pilot = inspect("dow-shared-"+tool+"-v1")
             if any(m["Destination"]=="/opt/dow-pillow" for m in pilot["Mounts"]):
                 extra += ["--mount",mount("type=volume","source=aiwork-home","target=/opt/dow-pillow",
@@ -175,6 +180,12 @@ def ensure(project, name=None, source_store=None, tool=None):
         host = info["HostConfig"]
         paths = {m["Destination"]: m for m in info["Mounts"]}
         allowed_paths = {workdir, HOME, BRIDGE, SHARED_WORK}
+        if tool:
+            for directory, account_volume in identity["directories"].items():
+                target = HOME + "/" + directory
+                allowed_paths.add(target)
+                if paths.get(target, {}).get("Name") != account_volume:
+                    raise RuntimeError("账号目录未正确挂载")
         if "/opt/dow-pillow" in paths and tool:
             allowed_paths.add("/opt/dow-pillow")
         if (info["Config"]["Labels"].get(PROJECT_LABEL) != project or host["NetworkMode"] != net
